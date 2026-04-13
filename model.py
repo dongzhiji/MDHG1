@@ -211,6 +211,7 @@ class MDHG(Module):
         return torch.clamp(act, min=0.10, max=0.95)
 
     def normalize_item_prior(self, prior):
+        """Normalize item prior tensor by mean value with numerical-stability epsilon."""
         return prior / (prior.mean() + self.numerical_eps)
 
     def fuzzy_cross_view(self, h1, h2, h3):
@@ -366,10 +367,9 @@ class MDHG(Module):
         i3_base, _ = self.ItemGraph(self.R1, self.adjacency1, self.embedding3.weight, 2)
         i3_fuzzy, _ = self.ItemGraph(self.R1_fuzzy, self.adjacency1_fuzzy, self.embedding3.weight, 2)
         hyperedge_act = self.build_hyperedge_activation(session_item, reversed_sess_event)
-        item_hyper_act = hyperedge_act.mean().view(1, 1)
-        item_hyper_prior_raw = self.R_fuzzy.reshape(-1)
-        item_hyper_prior_norm = self.normalize_item_prior(item_hyper_prior_raw)
-        i3 = item_hyper_act * i3_fuzzy + (1.0 - item_hyper_act) * i3_base
+        mean_hyperedge_activation = hyperedge_act.mean().view(1, 1)
+        item_hyper_prior_norm = self.normalize_item_prior(self.R_fuzzy.reshape(-1))
+        i3 = mean_hyperedge_activation * i3_fuzzy + (1.0 - mean_hyperedge_activation) * i3_base
         i3 = i3 * ((1.0 - self.item_prior_mix) + self.item_prior_mix * item_hyper_prior_norm.unsqueeze(1))
         i1, i2, i3 = F.normalize(i1, dim=-1), F.normalize(i2, dim=-1), F.normalize(i3, dim=-1)
 
