@@ -100,6 +100,12 @@ class MDHG(Module):
         self.adj1_fuzzy = torch.cuda.FloatTensor(adj1_fuzzy) if torch.cuda.is_available() else torch.FloatTensor(adj1_fuzzy)
         self.adj2_fuzzy = torch.cuda.FloatTensor(adj2_fuzzy) if torch.cuda.is_available() else torch.FloatTensor(adj2_fuzzy)
         self.R_fuzzy = torch.cuda.FloatTensor(R_fuzzy) if torch.cuda.is_available() else torch.FloatTensor(R_fuzzy)
+        self.R_fuzzy = self.R_fuzzy.reshape(-1)
+        if self.R_fuzzy.numel() < self.n_node:
+            pad = torch.ones(self.n_node - self.R_fuzzy.numel(), device=self.R_fuzzy.device)
+            self.R_fuzzy = torch.cat([self.R_fuzzy, pad], dim=0)
+        elif self.R_fuzzy.numel() > self.n_node:
+            self.R_fuzzy = self.R_fuzzy[:self.n_node]
         self.R1_fuzzy = torch.cuda.FloatTensor(R1_fuzzy) if torch.cuda.is_available() else torch.FloatTensor(R1_fuzzy)
 
         self.embedding1 = nn.Embedding(self.n_node, self.emb_size)
@@ -212,7 +218,8 @@ class MDHG(Module):
 
     def normalize_item_prior(self, prior):
         """Normalize item prior tensor by mean value with numerical-stability epsilon."""
-        return prior / (prior.mean() + self.numerical_eps)
+        scale = torch.clamp(prior.abs().mean(), min=self.numerical_eps)
+        return prior / scale
 
     def fuzzy_cross_view(self, h1, h2, h3):
         channel_embeddings = [h1, h2, h3]
@@ -367,8 +374,8 @@ class MDHG(Module):
         i3_base, _ = self.ItemGraph(self.R1, self.adjacency1, self.embedding3.weight, 2)
         i3_fuzzy, _ = self.ItemGraph(self.R1_fuzzy, self.adjacency1_fuzzy, self.embedding3.weight, 2)
         hyperedge_act = self.build_hyperedge_activation(session_item, reversed_sess_event)
-        mean_hyperedge_activation = hyperedge_act.mean().view(1, 1)
-        item_hyper_prior_norm = self.normalize_item_prior(self.R_fuzzy.reshape(-1))
+        mean_hyperedge_activation = hyperedge_act.mean()
+        item_hyper_prior_norm = self.normalize_item_prior(self.R_fuzzy)
         i3 = mean_hyperedge_activation * i3_fuzzy + (1.0 - mean_hyperedge_activation) * i3_base
         i3 = i3 * ((1.0 - self.item_prior_mix) + self.item_prior_mix * item_hyper_prior_norm.unsqueeze(1))
         i1, i2, i3 = F.normalize(i1, dim=-1), F.normalize(i2, dim=-1), F.normalize(i3, dim=-1)
