@@ -204,10 +204,14 @@ class MDHG(Module):
 
     # 机制2：动态超边激活概率
     def build_hyperedge_activation(self, session_item, reversed_sess_event):
+        """Compute session-level hyperedge activation probabilities from repeat ratio and event intensity."""
         repeat_ratio = self.calc_repeat_ratio_batch(session_item)
         evt_strength = self.event_scale(reversed_sess_event).squeeze(-1).mean(dim=1)
         act = self.hyperedge_min_prob + self.hyperedge_event_gain * evt_strength - self.hyperedge_repeat_penalty * repeat_ratio
         return torch.clamp(act, min=0.10, max=0.95)
+
+    def normalize_item_prior(self, prior):
+        return prior / (prior.mean() + self.numerical_eps)
 
     def fuzzy_cross_view(self, h1, h2, h3):
         channel_embeddings = [h1, h2, h3]
@@ -364,7 +368,7 @@ class MDHG(Module):
         hyperedge_act = self.build_hyperedge_activation(session_item, reversed_sess_event)
         item_hyper_act = hyperedge_act.mean().view(1, 1)
         item_hyper_prior_raw = self.R_fuzzy.reshape(-1)
-        item_hyper_prior_norm = item_hyper_prior_raw / (item_hyper_prior_raw.mean() + self.numerical_eps)
+        item_hyper_prior_norm = self.normalize_item_prior(item_hyper_prior_raw)
         i3 = item_hyper_act * i3_fuzzy + (1.0 - item_hyper_act) * i3_base
         i3 = i3 * ((1.0 - self.item_prior_mix) + self.item_prior_mix * item_hyper_prior_norm.unsqueeze(1))
         i1, i2, i3 = F.normalize(i1, dim=-1), F.normalize(i2, dim=-1), F.normalize(i3, dim=-1)
