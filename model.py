@@ -352,11 +352,12 @@ class MDHG(Module):
         i2, _ = self.ItemGraph(self.adj2_fuzzy, self.adjacency_T_fuzzy, self.embedding2.weight, 1)
         i3_base, _ = self.ItemGraph(self.R1, self.adjacency1, self.embedding3.weight, 2)
         i3_fuzzy, _ = self.ItemGraph(self.R1_fuzzy, self.adjacency1_fuzzy, self.embedding3.weight, 2)
-        hyperedge_act = self.build_hyperedge_activation(session_item, reversed_sess_event).mean().view(1, 1)
-        i3 = hyperedge_act * i3_fuzzy + (1.0 - hyperedge_act) * i3_base
-        item_hyper_prior = self.R_fuzzy.squeeze(0)
-        item_hyper_prior = item_hyper_prior / (item_hyper_prior.mean() + 1e-8)
-        i3 = i3 * (0.9 + 0.1 * item_hyper_prior.unsqueeze(1))
+        hyperedge_act = self.build_hyperedge_activation(session_item, reversed_sess_event)
+        global_hyperedge_act = hyperedge_act.mean().view(1, 1)
+        i3 = global_hyperedge_act * i3_fuzzy + (1.0 - global_hyperedge_act) * i3_base
+        item_hyper_prior_raw = self.R_fuzzy.squeeze(0)
+        item_hyper_prior_norm = item_hyper_prior_raw / (item_hyper_prior_raw.mean() + 1e-8)
+        i3 = i3 * (0.9 + 0.1 * item_hyper_prior_norm.unsqueeze(1))
         i1, i2, i3 = F.normalize(i1, dim=-1), F.normalize(i2, dim=-1), F.normalize(i3, dim=-1)
 
         item_mix, _ = self.fuzzy_cross_view(i1, i2, i3)
@@ -364,11 +365,15 @@ class MDHG(Module):
         if self.dataset == 'Tmall':
             s1 = self.generate_sess_emb_npos(i1, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
             s2 = self.generate_sess_emb_npos(i2, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
-            s3 = self.generate_sess_emb_npos(i3, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
+            s3_base = self.generate_sess_emb_npos(i3_base, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
+            s3_fuzzy = self.generate_sess_emb_npos(i3_fuzzy, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
         else:
             s1 = self.generate_sess_emb(i1, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
             s2 = self.generate_sess_emb(i2, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
-            s3 = self.generate_sess_emb(i3, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
+            s3_base = self.generate_sess_emb(i3_base, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
+            s3_fuzzy = self.generate_sess_emb(i3_fuzzy, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
+
+        s3 = hyperedge_act.unsqueeze(1) * s3_fuzzy + (1.0 - hyperedge_act.unsqueeze(1)) * s3_base
 
         prior_gate = self.build_fuzzy_relation_prior(session_item, reversed_sess_event)
         learned_gate = self.get_dynamic_fuzzy_gate((s1 + s2 + s3) / 3.0)
