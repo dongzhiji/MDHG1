@@ -147,6 +147,7 @@ class MDHG(Module):
         self.hyperedge_min_prob = 0.35
         self.hyperedge_event_gain = 0.20
         self.hyperedge_repeat_penalty = 0.30
+        self.item_prior_mix = 0.10
 
         self.init_parameters()
 
@@ -353,11 +354,10 @@ class MDHG(Module):
         i3_base, _ = self.ItemGraph(self.R1, self.adjacency1, self.embedding3.weight, 2)
         i3_fuzzy, _ = self.ItemGraph(self.R1_fuzzy, self.adjacency1_fuzzy, self.embedding3.weight, 2)
         hyperedge_act = self.build_hyperedge_activation(session_item, reversed_sess_event)
-        global_hyperedge_act = hyperedge_act.mean().view(1, 1)
-        i3 = global_hyperedge_act * i3_fuzzy + (1.0 - global_hyperedge_act) * i3_base
+        i3 = i3_fuzzy
         item_hyper_prior_raw = self.R_fuzzy.squeeze(0)
         item_hyper_prior_norm = item_hyper_prior_raw / (item_hyper_prior_raw.mean() + 1e-8)
-        i3 = i3 * (0.9 + 0.1 * item_hyper_prior_norm.unsqueeze(1))
+        i3 = i3 * ((1.0 - self.item_prior_mix) + self.item_prior_mix * item_hyper_prior_norm.unsqueeze(1))
         i1, i2, i3 = F.normalize(i1, dim=-1), F.normalize(i2, dim=-1), F.normalize(i3, dim=-1)
 
         item_mix, _ = self.fuzzy_cross_view(i1, i2, i3)
