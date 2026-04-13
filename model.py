@@ -86,12 +86,19 @@ class MDHG(Module):
         self.layers = layers
         self.w_k = 10
 
+        self.adjacency = trans_to_cuda(self.trans_adj(adjacency))
+        self.adjacency_T = trans_to_cuda(self.trans_adj(adjacency_T))
+        self.adjacency1 = trans_to_cuda(self.trans_adj(adjacency1))
         self.adjacency_fuzzy = trans_to_cuda(self.trans_adj(adjacency_fuzzy))
         self.adjacency_T_fuzzy = trans_to_cuda(self.trans_adj(adjacency_T_fuzzy))
         self.adjacency1_fuzzy = trans_to_cuda(self.trans_adj(adjacency1_fuzzy))
 
+        self.adj1 = torch.cuda.FloatTensor(adj1) if torch.cuda.is_available() else torch.FloatTensor(adj1)
+        self.adj2 = torch.cuda.FloatTensor(adj2) if torch.cuda.is_available() else torch.FloatTensor(adj2)
+        self.R1 = torch.cuda.FloatTensor(R1) if torch.cuda.is_available() else torch.FloatTensor(R1)
         self.adj1_fuzzy = torch.cuda.FloatTensor(adj1_fuzzy) if torch.cuda.is_available() else torch.FloatTensor(adj1_fuzzy)
         self.adj2_fuzzy = torch.cuda.FloatTensor(adj2_fuzzy) if torch.cuda.is_available() else torch.FloatTensor(adj2_fuzzy)
+        self.R_fuzzy = torch.cuda.FloatTensor(R_fuzzy) if torch.cuda.is_available() else torch.FloatTensor(R_fuzzy)
         self.R1_fuzzy = torch.cuda.FloatTensor(R1_fuzzy) if torch.cuda.is_available() else torch.FloatTensor(R1_fuzzy)
 
         self.embedding1 = nn.Embedding(self.n_node, self.emb_size)
@@ -133,9 +140,13 @@ class MDHG(Module):
         self.sess_loss_weight = 0.01
         self.rank_loss_weight = 0.15
         self.hyper_loss_weight = 0.01
+        self.soft_loss_weight = 0.05
 
         self.warmup_epochs = 2
         self.max_fuzzy_factor = 0.25
+        self.hyperedge_min_prob = 0.35
+        self.hyperedge_event_gain = 0.20
+        self.hyperedge_repeat_penalty = 0.30
 
         self.init_parameters()
 
@@ -185,6 +196,13 @@ class MDHG(Module):
         gate_logits = self.gate_mlp(sess_emb)
         gate_logits = self.gate_dropout(gate_logits)
         return torch.softmax(gate_logits, dim=-1)
+
+    # 机制2：动态超边激活概率
+    def build_hyperedge_activation(self, session_item, reversed_sess_event):
+        repeat_ratio = self.calc_repeat_ratio_batch(session_item)
+        evt_strength = self.event_scale(reversed_sess_event).squeeze(-1).mean(dim=1)
+        act = self.hyperedge_min_prob + self.hyperedge_event_gain * evt_strength - self.hyperedge_repeat_penalty * repeat_ratio
+        return torch.clamp(act, min=0.10, max=0.95)
 
     def fuzzy_cross_view(self, h1, h2, h3):
         channel_embeddings = [h1, h2, h3]
@@ -299,13 +317,21 @@ class MDHG(Module):
         hard_neg, _ = torch.max(neg, dim=1)
         rank_loss = torch.mean(F.relu(self.rank_margin - pos + hard_neg))
 
+        n_items = scores_item.size(1)
+        smooth = torch.clamp(0.02 + 0.08 * entropy, min=0.02, max=0.10).unsqueeze(1)
+        one_hot = F.one_hot(tar, num_classes=n_items).float()
+        uniform = torch.full_like(one_hot, 1.0 / n_items)
+        soft_targets = (1.0 - smooth) * one_hot + smooth * uniform
+        soft_loss = -(soft_targets * F.log_softmax(scores_item, dim=1)).sum(dim=1).mean()
+
         hyper_loss = ((s1 - s2).pow(2).mean() + (s2 - s3).pow(2).mean() + (s1 - s3).pow(2).mean()) / 3.0
 
         fuzzy_loss = (
             self.rel_loss_weight * rel_loss +
             self.sess_loss_weight * sess_loss +
             self.rank_loss_weight * rank_loss +
-            self.hyper_loss_weight * hyper_loss
+            self.hyper_loss_weight * hyper_loss +
+            self.soft_loss_weight * soft_loss
         )
         return fuzzy_loss
 
@@ -324,7 +350,13 @@ class MDHG(Module):
 
         i1, _ = self.ItemGraph(self.adj1_fuzzy, self.adjacency_fuzzy, self.embedding1.weight, 0)
         i2, _ = self.ItemGraph(self.adj2_fuzzy, self.adjacency_T_fuzzy, self.embedding2.weight, 1)
-        i3, _ = self.ItemGraph(self.R1_fuzzy, self.adjacency1_fuzzy, self.embedding3.weight, 2)
+        i3_base, _ = self.ItemGraph(self.R1, self.adjacency1, self.embedding3.weight, 2)
+        i3_fuzzy, _ = self.ItemGraph(self.R1_fuzzy, self.adjacency1_fuzzy, self.embedding3.weight, 2)
+        hyperedge_act = self.build_hyperedge_activation(session_item, reversed_sess_event).mean().view(1, 1)
+        i3 = hyperedge_act * i3_fuzzy + (1.0 - hyperedge_act) * i3_base
+        item_hyper_prior = self.R_fuzzy.squeeze(0)
+        item_hyper_prior = item_hyper_prior / (item_hyper_prior.mean() + 1e-8)
+        i3 = i3 * (0.9 + 0.1 * item_hyper_prior.unsqueeze(1))
         i1, i2, i3 = F.normalize(i1, dim=-1), F.normalize(i2, dim=-1), F.normalize(i3, dim=-1)
 
         item_mix, _ = self.fuzzy_cross_view(i1, i2, i3)
