@@ -85,6 +85,7 @@ class MDHG(Module):
         self.lr = lr
         self.layers = layers
         self.w_k = 10
+        self.numerical_eps = 1e-8
 
         self.adjacency = trans_to_cuda(self.trans_adj(adjacency))
         self.adjacency_T = trans_to_cuda(self.trans_adj(adjacency_T))
@@ -361,9 +362,11 @@ class MDHG(Module):
         i3_base, _ = self.ItemGraph(self.R1, self.adjacency1, self.embedding3.weight, 2)
         i3_fuzzy, _ = self.ItemGraph(self.R1_fuzzy, self.adjacency1_fuzzy, self.embedding3.weight, 2)
         hyperedge_act = self.build_hyperedge_activation(session_item, reversed_sess_event)
-        item_hyper_prior_raw = self.R_fuzzy.squeeze(0)
-        item_hyper_prior_norm = item_hyper_prior_raw / (item_hyper_prior_raw.mean() + 1e-8)
-        i3 = i3_fuzzy * ((1.0 - self.item_prior_mix) + self.item_prior_mix * item_hyper_prior_norm.unsqueeze(1))
+        item_hyper_act = hyperedge_act.mean().view(1, 1)
+        item_hyper_prior_raw = self.R_fuzzy.reshape(-1)
+        item_hyper_prior_norm = item_hyper_prior_raw / (item_hyper_prior_raw.mean() + self.numerical_eps)
+        i3 = item_hyper_act * i3_fuzzy + (1.0 - item_hyper_act) * i3_base
+        i3 = i3 * ((1.0 - self.item_prior_mix) + self.item_prior_mix * item_hyper_prior_norm.unsqueeze(1))
         i1, i2, i3 = F.normalize(i1, dim=-1), F.normalize(i2, dim=-1), F.normalize(i3, dim=-1)
 
         item_mix, _ = self.fuzzy_cross_view(i1, i2, i3)
