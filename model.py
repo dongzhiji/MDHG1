@@ -148,6 +148,9 @@ class MDHG(Module):
         self.hyperedge_event_gain = 0.20
         self.hyperedge_repeat_penalty = 0.30
         self.item_prior_mix = 0.10
+        self.soft_label_smooth_min = 0.02
+        self.soft_label_smooth_gain = 0.08
+        self.soft_label_smooth_max = 0.10
 
         self.init_parameters()
 
@@ -319,7 +322,11 @@ class MDHG(Module):
         rank_loss = torch.mean(F.relu(self.rank_margin - pos + hard_neg))
 
         n_items = scores_item.size(1)
-        smooth = torch.clamp(0.02 + 0.08 * entropy, min=0.02, max=0.10).unsqueeze(1)
+        smooth = torch.clamp(
+            self.soft_label_smooth_min + self.soft_label_smooth_gain * entropy,
+            min=self.soft_label_smooth_min,
+            max=self.soft_label_smooth_max
+        ).unsqueeze(1)
         one_hot = F.one_hot(tar, num_classes=n_items).float()
         uniform = torch.full_like(one_hot, 1.0 / n_items)
         soft_targets = (1.0 - smooth) * one_hot + smooth * uniform
@@ -354,10 +361,9 @@ class MDHG(Module):
         i3_base, _ = self.ItemGraph(self.R1, self.adjacency1, self.embedding3.weight, 2)
         i3_fuzzy, _ = self.ItemGraph(self.R1_fuzzy, self.adjacency1_fuzzy, self.embedding3.weight, 2)
         hyperedge_act = self.build_hyperedge_activation(session_item, reversed_sess_event)
-        i3 = i3_fuzzy
         item_hyper_prior_raw = self.R_fuzzy.squeeze(0)
         item_hyper_prior_norm = item_hyper_prior_raw / (item_hyper_prior_raw.mean() + 1e-8)
-        i3 = i3 * ((1.0 - self.item_prior_mix) + self.item_prior_mix * item_hyper_prior_norm.unsqueeze(1))
+        i3 = i3_fuzzy * ((1.0 - self.item_prior_mix) + self.item_prior_mix * item_hyper_prior_norm.unsqueeze(1))
         i1, i2, i3 = F.normalize(i1, dim=-1), F.normalize(i2, dim=-1), F.normalize(i3, dim=-1)
 
         item_mix, _ = self.fuzzy_cross_view(i1, i2, i3)
