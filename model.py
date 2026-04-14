@@ -444,9 +444,10 @@ class MDHG(Module):
 
         sf = self.fuse_session_views(s1, s2, s3, gate)
 
-        item_mix_pad = torch.cat([torch.zeros(1, self.emb_size, device=item_mix.device), item_mix], dim=0)
-        last_item_ids = torch.clamp(reversed_sess_item[:, 0], min=0, max=self.n_node)
-        last_item_emb = item_mix_pad[last_item_ids]
+        last_item_ids = reversed_sess_item[:, 0]
+        last_item_pos = torch.clamp(last_item_ids - 1, min=0, max=self.n_node - 1)
+        valid_last = (last_item_ids > 0).float().unsqueeze(1)
+        last_item_emb = item_mix[last_item_pos] * valid_last
         len_factor = torch.clamp(
             1.0 / torch.sqrt(session_len.float().squeeze(-1).clamp(min=1.0)),
             min=self.short_len_factor_min, max=1.0
