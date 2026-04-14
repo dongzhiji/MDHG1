@@ -45,6 +45,9 @@ parser.add_argument('--K3', type=int, default=20, help='numbers')
 parser.add_argument('--dropout', type=float, default=0.3, help='dropout rate')
 parser.add_argument('--gpu_id', type=int, default=0, help='gpu_id')
 parser.add_argument('--alpha', type=float, default=0.2, help='Alpha for the leaky_relu.')
+parser.add_argument('--intent_align_weight', type=float, default=0.03, help='weight of intent-item alignment loss')
+parser.add_argument('--short_intent_min', type=float, default=0.10, help='minimum short-term intent fusion gate')
+parser.add_argument('--short_intent_max', type=float, default=0.45, help='maximum short-term intent fusion gate')
 
 opt = parser.parse_args()
 
@@ -135,7 +138,10 @@ def main():
         K2=opt.K2,
         K3=opt.K3,
         dropout=opt.dropout,
-        alpha=opt.alpha
+        alpha=opt.alpha,
+        intent_align_weight=opt.intent_align_weight,
+        short_intent_min=opt.short_intent_min,
+        short_intent_max=opt.short_intent_max
     ))
 
     #reset_parameters(model)
