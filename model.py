@@ -471,11 +471,12 @@ class MDHG(Module):
         # temperature scaling for better ranking sharpness
         scores_item = scores_item / self.score_temperature
 
-        ce_loss = self.ce_with_label_smoothing(scores_item, tar, smooth=self.label_smoothing)
-        bpr_loss = self.bpr_hard_negative_loss(scores_item, tar, topk=self.topk_hardneg)
+        tar_safe = torch.clamp(tar, min=0, max=item_mix.size(0) - 1)
+        ce_loss = self.ce_with_label_smoothing(scores_item, tar_safe, smooth=self.label_smoothing)
+        bpr_loss = self.bpr_hard_negative_loss(scores_item, tar_safe, topk=self.topk_hardneg)
         if train:
             sf_base_norm = F.normalize(sf_base, dim=-1)
-            target_item_emb = item_mix[tar]
+            target_item_emb = item_mix[tar_safe]
             intent_align_loss = (1.0 - F.cosine_similarity(sf_base_norm, target_item_emb, dim=-1)).mean()
         else:
             intent_align_loss = torch.tensor(0.0, device=scores_item.device)
