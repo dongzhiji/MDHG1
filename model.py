@@ -446,30 +446,24 @@ class MDHG(Module):
         sf_base = sf
 
         last_item_ids = reversed_sess_item[:, 0]
-        valid_last = (last_item_ids > 0).unsqueeze(1)
-        last_item_pos = torch.where(
-            valid_last.squeeze(1),
-            torch.clamp(last_item_ids - 1, min=0, max=self.n_node - 1),
-            torch.zeros_like(last_item_ids)
-        )
-        last_item_emb = item_mix[last_item_pos]
+        valid_last = (last_item_ids > 0)
+        last_item_emb = torch.zeros(session_item.size(0), self.emb_size, device=item_mix.device)
+        if valid_last.any():
+            last_item_pos = torch.clamp(last_item_ids[valid_last] - 1, min=0, max=self.n_node - 1)
+            last_item_emb[valid_last] = item_mix[last_item_pos]
         len_factor = torch.clamp(
             1.0 / torch.sqrt(session_len.float().squeeze(-1).clamp(min=1.0)),
             min=self.short_len_factor_min, max=1.0
         ).unsqueeze(1)
         short_gate = torch.sigmoid(self.short_intent_mlp(torch.cat([sf, last_item_emb], dim=1)))
-        short_gate = torch.clamp(
-            self.short_intent_min + (self.short_intent_max - self.short_intent_min) * short_gate * len_factor,
-            min=self.short_intent_min, max=self.short_intent_max
-        )
-        short_gate = short_gate * valid_last.float()
+        short_gate = self.short_intent_min + (self.short_intent_max - self.short_intent_min) * short_gate * len_factor
+        short_gate = short_gate * valid_last.float().unsqueeze(1)
         sf = (1.0 - short_gate) * sf + short_gate * last_item_emb
 
         if train:
             sf = self.final_dropout(sf)
 
         sf_norm = F.normalize(sf, dim=-1)
-        sf_base_norm = F.normalize(sf_base, dim=-1)
         sf = self.w_k * sf_norm
         item_mix = F.normalize(item_mix, dim=-1)
         scores_item = torch.mm(sf, item_mix.t())
@@ -479,8 +473,12 @@ class MDHG(Module):
 
         ce_loss = self.ce_with_label_smoothing(scores_item, tar, smooth=self.label_smoothing)
         bpr_loss = self.bpr_hard_negative_loss(scores_item, tar, topk=self.topk_hardneg)
-        target_item_emb = item_mix[tar]
-        intent_align_loss = (1.0 - F.cosine_similarity(sf_base_norm, target_item_emb, dim=-1)).mean()
+        if train:
+            sf_base_norm = F.normalize(sf_base, dim=-1)
+            target_item_emb = item_mix[tar]
+            intent_align_loss = (1.0 - F.cosine_similarity(sf_base_norm, target_item_emb, dim=-1)).mean()
+        else:
+            intent_align_loss = torch.tensor(0.0, device=scores_item.device)
         loss_item = ce_loss + self.bpr_loss_weight * bpr_loss + self.intent_align_weight * intent_align_loss
         con_loss = torch.tensor(0.0, device=scores_item.device)
 
