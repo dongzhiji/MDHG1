@@ -85,13 +85,27 @@ class MDHG(Module):
         self.lr = lr
         self.layers = layers
         self.w_k = 10
+        self.numerical_eps = 1e-8
 
+        self.adjacency = trans_to_cuda(self.trans_adj(adjacency))
+        self.adjacency_T = trans_to_cuda(self.trans_adj(adjacency_T))
+        self.adjacency1 = trans_to_cuda(self.trans_adj(adjacency1))
         self.adjacency_fuzzy = trans_to_cuda(self.trans_adj(adjacency_fuzzy))
         self.adjacency_T_fuzzy = trans_to_cuda(self.trans_adj(adjacency_T_fuzzy))
         self.adjacency1_fuzzy = trans_to_cuda(self.trans_adj(adjacency1_fuzzy))
 
+        self.adj1 = torch.cuda.FloatTensor(adj1) if torch.cuda.is_available() else torch.FloatTensor(adj1)
+        self.adj2 = torch.cuda.FloatTensor(adj2) if torch.cuda.is_available() else torch.FloatTensor(adj2)
+        self.R1 = torch.cuda.FloatTensor(R1) if torch.cuda.is_available() else torch.FloatTensor(R1)
         self.adj1_fuzzy = torch.cuda.FloatTensor(adj1_fuzzy) if torch.cuda.is_available() else torch.FloatTensor(adj1_fuzzy)
         self.adj2_fuzzy = torch.cuda.FloatTensor(adj2_fuzzy) if torch.cuda.is_available() else torch.FloatTensor(adj2_fuzzy)
+        self.R_fuzzy = torch.cuda.FloatTensor(R_fuzzy) if torch.cuda.is_available() else torch.FloatTensor(R_fuzzy)
+        self.R_fuzzy = self.R_fuzzy.reshape(-1)
+        if self.R_fuzzy.numel() < self.n_node:
+            pad = torch.ones(self.n_node - self.R_fuzzy.numel(), device=self.R_fuzzy.device)
+            self.R_fuzzy = torch.cat([self.R_fuzzy, pad], dim=0)
+        elif self.R_fuzzy.numel() > self.n_node:
+            self.R_fuzzy = self.R_fuzzy[:self.n_node]
         self.R1_fuzzy = torch.cuda.FloatTensor(R1_fuzzy) if torch.cuda.is_available() else torch.FloatTensor(R1_fuzzy)
 
         self.embedding1 = nn.Embedding(self.n_node, self.emb_size)
@@ -131,12 +145,24 @@ class MDHG(Module):
         self.rank_margin = 0.30
         self.rel_loss_weight = 0.05
         self.sess_loss_weight = 0.01
-        self.rank_loss_weight = 0.15
+        self.rank_loss_weight = 0.18
         self.hyper_loss_weight = 0.01
+        self.soft_loss_weight = 0.02
 
-        self.warmup_epochs = 2
+        self.warmup_epochs = 0
         self.max_fuzzy_factor = 0.25
+        self.hyperedge_min_prob = 0.35
+        self.hyperedge_event_gain = 0.20
+        self.hyperedge_repeat_penalty = 0.30
+        self.item_prior_mix = 0.10
+        self.soft_label_smooth_min = 0.02
+        self.soft_label_smooth_gain = 0.08
+        self.soft_label_smooth_max = 0.06
 
+        self.label_smoothing = 0.06
+        self.bpr_loss_weight = 0.18
+        self.topk_hardneg = 100
+        self.score_temperature = 0.85
         self.init_parameters()
 
     def init_parameters(self):
@@ -186,6 +212,19 @@ class MDHG(Module):
         gate_logits = self.gate_dropout(gate_logits)
         return torch.softmax(gate_logits, dim=-1)
 
+    # 机制2：动态超边激活概率
+    def build_hyperedge_activation(self, session_item, reversed_sess_event):
+        """Compute session-level hyperedge activation probabilities from repeat ratio and event intensity."""
+        repeat_ratio = self.calc_repeat_ratio_batch(session_item)
+        evt_strength = self.event_scale(reversed_sess_event).squeeze(-1).mean(dim=1)
+        act = self.hyperedge_min_prob + self.hyperedge_event_gain * evt_strength - self.hyperedge_repeat_penalty * repeat_ratio
+        return torch.clamp(act, min=0.10, max=0.95)
+
+    def normalize_item_prior(self, prior):
+        """Normalize item prior tensor by mean value with numerical-stability epsilon."""
+        scale = torch.clamp(prior.abs().mean(), min=self.numerical_eps)
+        return prior / scale
+
     def fuzzy_cross_view(self, h1, h2, h3):
         channel_embeddings = [h1, h2, h3]
         raw_weights = []
@@ -200,6 +239,29 @@ class MDHG(Module):
     def fuse_session_views(self, s1, s2, s3, gate):
         gate = gate / (gate.sum(dim=1, keepdim=True) + 1e-8)
         return gate[:, 0:1] * s1 + gate[:, 1:2] * s2 + gate[:, 2:3] * s3
+
+    def ce_with_label_smoothing(self, logits, target, smooth=0.0):
+        n_class = logits.size(1)
+        with torch.no_grad():
+            true_dist = torch.zeros_like(logits)
+            true_dist.fill_(smooth / (n_class - 1))
+            true_dist.scatter_(1, target.unsqueeze(1), 1.0 - smooth)
+        log_prob = F.log_softmax(logits, dim=1)
+        return torch.mean(torch.sum(-true_dist * log_prob, dim=1))
+
+    def bpr_hard_negative_loss(self, logits, target, topk=100):
+        # logits: [B, N], target: [B]
+        B, N = logits.size()
+        pos = logits.gather(1, target.view(-1, 1)).squeeze(1)  # [B]
+
+        neg_logits = logits.clone()
+        neg_logits.scatter_(1, target.view(-1, 1), -1e9)  # mask positive
+        k = min(topk, N - 1)
+        hard_vals, hard_idx = torch.topk(neg_logits, k=k, dim=1)  # [B, k]
+        # 在 hard negatives 中随机采一个，避免总盯最难负样本导致不稳定
+        rand_col = torch.randint(0, k, (B,), device=logits.device)
+        sampled_neg = hard_vals[torch.arange(B, device=logits.device), rand_col]
+        return -torch.log(torch.sigmoid(pos - sampled_neg) + 1e-8).mean()
 
     def generate_sess_emb(self, item_embedding, event_embedding, session_item, session_len, reversed_sess_item,
                           reversed_sess_event, mask):
@@ -299,13 +361,25 @@ class MDHG(Module):
         hard_neg, _ = torch.max(neg, dim=1)
         rank_loss = torch.mean(F.relu(self.rank_margin - pos + hard_neg))
 
+        n_items = scores_item.size(1)
+        smooth = torch.clamp(
+            self.soft_label_smooth_min + self.soft_label_smooth_gain * entropy,
+            min=self.soft_label_smooth_min,
+            max=self.soft_label_smooth_max
+        ).unsqueeze(1)
+        one_hot = F.one_hot(tar, num_classes=n_items).float()
+        uniform = torch.full_like(one_hot, 1.0 / n_items)
+        soft_targets = (1.0 - smooth) * one_hot + smooth * uniform
+        soft_loss = -(soft_targets * F.log_softmax(scores_item, dim=1)).sum(dim=1).mean()
+
         hyper_loss = ((s1 - s2).pow(2).mean() + (s2 - s3).pow(2).mean() + (s1 - s3).pow(2).mean()) / 3.0
 
         fuzzy_loss = (
             self.rel_loss_weight * rel_loss +
             self.sess_loss_weight * sess_loss +
             self.rank_loss_weight * rank_loss +
-            self.hyper_loss_weight * hyper_loss
+            self.hyper_loss_weight * hyper_loss +
+            self.soft_loss_weight * soft_loss
         )
         return fuzzy_loss
 
@@ -324,7 +398,13 @@ class MDHG(Module):
 
         i1, _ = self.ItemGraph(self.adj1_fuzzy, self.adjacency_fuzzy, self.embedding1.weight, 0)
         i2, _ = self.ItemGraph(self.adj2_fuzzy, self.adjacency_T_fuzzy, self.embedding2.weight, 1)
-        i3, _ = self.ItemGraph(self.R1_fuzzy, self.adjacency1_fuzzy, self.embedding3.weight, 2)
+        i3_base, _ = self.ItemGraph(self.R1, self.adjacency1, self.embedding3.weight, 2)
+        i3_fuzzy, _ = self.ItemGraph(self.R1_fuzzy, self.adjacency1_fuzzy, self.embedding3.weight, 2)
+        hyperedge_act = self.build_hyperedge_activation(session_item, reversed_sess_event)
+        mean_hyperedge_activation = hyperedge_act.mean()
+        item_hyper_prior_norm = self.normalize_item_prior(self.R_fuzzy)
+        i3 = mean_hyperedge_activation * i3_fuzzy + (1.0 - mean_hyperedge_activation) * i3_base
+        i3 = i3 * ((1.0 - self.item_prior_mix) + self.item_prior_mix * item_hyper_prior_norm.unsqueeze(1))
         i1, i2, i3 = F.normalize(i1, dim=-1), F.normalize(i2, dim=-1), F.normalize(i3, dim=-1)
 
         item_mix, _ = self.fuzzy_cross_view(i1, i2, i3)
@@ -332,11 +412,15 @@ class MDHG(Module):
         if self.dataset == 'Tmall':
             s1 = self.generate_sess_emb_npos(i1, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
             s2 = self.generate_sess_emb_npos(i2, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
-            s3 = self.generate_sess_emb_npos(i3, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
+            s3_base = self.generate_sess_emb_npos(i3_base, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
+            s3_fuzzy = self.generate_sess_emb_npos(i3_fuzzy, event_weight, session_item, session_len,reversed_sess_item, reversed_sess_event, mask)
         else:
             s1 = self.generate_sess_emb(i1, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
             s2 = self.generate_sess_emb(i2, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
-            s3 = self.generate_sess_emb(i3, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
+            s3_base = self.generate_sess_emb(i3_base, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
+            s3_fuzzy = self.generate_sess_emb(i3_fuzzy, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
+
+        s3 = hyperedge_act.unsqueeze(1) * s3_fuzzy + (1.0 - hyperedge_act.unsqueeze(1)) * s3_base
 
         prior_gate = self.build_fuzzy_relation_prior(session_item, reversed_sess_event)
         learned_gate = self.get_dynamic_fuzzy_gate((s1 + s2 + s3) / 3.0)
@@ -355,7 +439,12 @@ class MDHG(Module):
         item_mix = F.normalize(item_mix, dim=-1)
         scores_item = torch.mm(sf, item_mix.t())
 
-        loss_item = self.loss_function(scores_item, tar)
+        # temperature scaling for better ranking sharpness
+        scores_item = scores_item / self.score_temperature
+
+        ce_loss = self.ce_with_label_smoothing(scores_item, tar, smooth=self.label_smoothing)
+        bpr_loss = self.bpr_hard_negative_loss(scores_item, tar, topk=self.topk_hardneg)
+        loss_item = ce_loss + self.bpr_loss_weight * bpr_loss
         con_loss = torch.tensor(0.0, device=scores_item.device)
 
         if train:

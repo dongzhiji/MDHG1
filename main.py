@@ -34,7 +34,7 @@ parser.add_argument('--epoch', type=int, default=10, help='number of epochs to t
 parser.add_argument('--batchSize', type=int, default=256, help='input batch size')
 parser.add_argument('--embSize', type=int, default=128, help='embedding size')
 parser.add_argument('--l2', type=float, default=1e-5, help='l2 penalty')
-parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
+parser.add_argument('--lr', type=float, default=0.0005, help='learning rate')
 parser.add_argument('--layer', type=int, default=2, help='the number of layer used')
 parser.add_argument('--beta', type=float, default=0.005, help='ssl task maginitude')
 parser.add_argument('--lam', type=float, default=0.0001, help='diff task maginitude')
@@ -42,7 +42,7 @@ parser.add_argument('--eps', type=float, default=0.2, help='eps')
 parser.add_argument('--K1', type=int, default=80, help='numbers')
 parser.add_argument('--K2', type=int, default=50, help='numbers')
 parser.add_argument('--K3', type=int, default=20, help='numbers')
-parser.add_argument('--dropout', type=float, default=0.5, help='dropout rate')
+parser.add_argument('--dropout', type=float, default=0.3, help='dropout rate')
 parser.add_argument('--gpu_id', type=int, default=0, help='gpu_id')
 parser.add_argument('--alpha', type=float, default=0.2, help='Alpha for the leaky_relu.')
 
@@ -210,6 +210,7 @@ def main():
 
 if __name__ == '__main__':
     start_time = time.time()
+    init_seed(2026)
     main()
     end_time = time.time()
     logging.info(f"总运行时间: {end_time - start_time:.2f} 秒")
