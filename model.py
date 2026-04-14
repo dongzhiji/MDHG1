@@ -77,7 +77,8 @@ class MDHG(Module):
                  adj1_fuzzy, adj2_fuzzy, R_fuzzy, R1_fuzzy,
                  n_node, lr, layers, l2, beta, lam, eps, dataset,
                  K1, K2, K3, dropout, alpha, emb_size=100, batch_size=100,
-                 intent_align_weight=0.03, short_intent_min=0.10, short_intent_max=0.45):
+                 intent_align_weight=0.03, short_intent_min=0.10, short_intent_max=0.45,
+                 short_len_factor_min=0.35):
         super(MDHG, self).__init__()
         self.emb_size = emb_size
         self.batch_size = batch_size
@@ -170,6 +171,7 @@ class MDHG(Module):
         self.intent_align_weight = intent_align_weight
         self.short_intent_min = short_intent_min
         self.short_intent_max = short_intent_max
+        self.short_len_factor_min = short_len_factor_min
         self.topk_hardneg = 100
         self.score_temperature = 0.85
         self.init_parameters()
@@ -447,7 +449,7 @@ class MDHG(Module):
         last_item_emb = item_mix_pad[last_item_ids]
         len_factor = torch.clamp(
             1.0 / torch.sqrt(session_len.float().squeeze(-1).clamp(min=1.0)),
-            min=0.35, max=1.0
+            min=self.short_len_factor_min, max=1.0
         ).unsqueeze(1)
         short_gate = torch.sigmoid(self.short_intent_mlp(torch.cat([sf, last_item_emb], dim=1)))
         short_gate = torch.clamp(
