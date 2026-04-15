@@ -1,0 +1,23 @@
+2026-04-15 07:17:00,174 - INFO - 日志文件: logs/training_20260415_071700.log
+2026-04-15 07:17:00,174 - INFO - 运行参数: Namespace(dataset='retailrocket', epoch=0, batchSize=512, embSize=128, l2=1e-05, lr=0.0005, layer=2, beta=0.005, lam=0.0001, eps=0.2, K1=80, K2=50, K3=20, dropout=0.3, gpu_id=0, alpha=0.2, intent_align_weight=0.03, short_intent_min=0.1, short_intent_max=0.45, short_len_factor_min=0.35, train_file=None, test_file='test.txt', all_train_file=None)
+2026-04-15 07:17:00,175 - INFO - CUDA is not available. Running on CPU.
+2026-04-15 07:17:00,175 - INFO - Random seed set to: 2026
+2026-04-15 07:17:00,175 - INFO - ============================================================
+2026-04-15 07:17:00,175 - INFO - 开始加载数据...
+2026-04-15 07:17:00,184 - WARNING - 训练集不存在: /home/runner/work/MDHG1/MDHG1/datasets/retailrocket/train.txt，临时使用测试集作为训练集以保证代码可运行
+2026-04-15 07:17:00,184 - WARNING - all_train_seq不存在: /home/runner/work/MDHG1/MDHG1/datasets/retailrocket/all_train_seq.txt，已从训练数据自动构建
+2026-04-15 07:17:00,184 - INFO - 数据加载路径 train=/home/runner/work/MDHG1/MDHG1/datasets/retailrocket/train.txt
+2026-04-15 07:17:00,185 - INFO - 数据加载路径 test=/home/runner/work/MDHG1/MDHG1/test.txt
+2026-04-15 07:17:00,185 - INFO - 数据加载路径 all_train=[auto-generated]
+2026-04-15 07:17:00,201 - INFO - 数据集: retailrocket, 节点数: 36968
+2026-04-15 07:17:42,186 - INFO - 创建模型...
+2026-04-15 07:17:43,118 - INFO - 模型创建完成，参数初始化完成
+2026-04-15 07:17:43,118 - INFO - 开始训练，共 0 个epoch
+2026-04-15 07:17:43,118 - INFO - ============================================================
+2026-04-15 07:17:43,118 - INFO - 训练完成！最终最佳结果:
+2026-04-15 07:17:43,119 - INFO - K=5: Hit=0.0000%, MRR=0.0000%, NDCG=0.0000%
+2026-04-15 07:17:43,119 - INFO - K=10: Hit=0.0000%, MRR=0.0000%, NDCG=0.0000%
+2026-04-15 07:17:43,119 - INFO - K=20: Hit=0.0000%, MRR=0.0000%, NDCG=0.0000%
+2026-04-15 07:17:43,119 - INFO - K=50: Hit=0.0000%, MRR=0.0000%, NDCG=0.0000%
+2026-04-15 07:17:43,119 - INFO - 结果已保存到: logs/training_20260415_071700_results.txt
+2026-04-15 07:17:43,121 - INFO - 总运行时间: 42.95 秒

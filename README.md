@@ -14,3 +14,8 @@ python main.py --dataset=retailrocket
 python main.py --dataset=amazon
 ```
 
+For RetailRocket quick run with a prepared `test.txt` in repository root:
+```
+python main.py --dataset=retailrocket --test_file=test.txt
+```
+If `datasets/retailrocket/train.txt` or `all_train_seq.txt` is missing, code now auto-falls back to runnable bootstrap mode.

@@ -49,6 +49,9 @@ parser.add_argument('--intent_align_weight', type=float, default=0.03, help='wei
 parser.add_argument('--short_intent_min', type=float, default=0.10, help='minimum short-term intent fusion gate')
 parser.add_argument('--short_intent_max', type=float, default=0.45, help='maximum short-term intent fusion gate')
 parser.add_argument('--short_len_factor_min', type=float, default=0.35, help='minimum session-length factor in short-term intent fusion')
+parser.add_argument('--train_file', default=None, help='custom train pickle path')
+parser.add_argument('--test_file', default=None, help='custom test pickle path')
+parser.add_argument('--all_train_file', default=None, help='custom all_train_seq pickle path')
 
 opt = parser.parse_args()
 
@@ -87,13 +90,90 @@ def init_seed(seed=None):
     logging.info(f"Random seed set to: {seed}")
 
 
+def _resolve_path(path):
+    if path is None:
+        return None
+    if os.path.isabs(path):
+        return path
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), path)
+
+
+def _load_pickle_if_exists(path):
+    if path is None:
+        return None
+    if not os.path.exists(path):
+        return None
+    with open(path, 'rb') as f:
+        return pickle.load(f)
+
+
+def _extract_sessions(data):
+    if isinstance(data, (list, tuple)) and len(data) >= 1:
+        return data[0]
+    raise ValueError("数据格式错误，无法提取session序列")
+
+
+def _infer_n_node(train_data, test_data, all_train, default_n_node):
+    max_item = 0
+
+    def _update_from_sessions(sessions):
+        nonlocal max_item
+        for sess in sessions:
+            if len(sess) > 0:
+                max_item = max(max_item, int(max(sess)))
+
+    for d in [train_data, test_data]:
+        if isinstance(d, (list, tuple)) and len(d) >= 1:
+            _update_from_sessions(d[0])
+
+    if isinstance(all_train, list) and len(all_train) == 2 and isinstance(all_train[0], (list, np.ndarray)):
+        _update_from_sessions(all_train[0])
+    else:
+        _update_from_sessions(all_train)
+
+    return max(default_n_node, max_item)
+
+
+def _load_data_bundle():
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    dataset_root = os.path.join(repo_root, 'datasets', opt.dataset)
+
+    train_path = _resolve_path(opt.train_file) if opt.train_file else os.path.join(dataset_root, 'train.txt')
+    test_path = _resolve_path(opt.test_file) if opt.test_file else os.path.join(dataset_root, 'test.txt')
+    all_train_path = _resolve_path(opt.all_train_file) if opt.all_train_file else os.path.join(dataset_root, 'all_train_seq.txt')
+
+    if (not os.path.exists(test_path)) and (opt.test_file is None) and (opt.dataset == 'retailrocket'):
+        repo_test = os.path.join(repo_root, 'test.txt')
+        if os.path.exists(repo_test):
+            test_path = repo_test
+            logging.warning(f"未找到 {os.path.join(dataset_root, 'test.txt')}，已回退到仓库根目录测试集: {test_path}")
+
+    train_data = _load_pickle_if_exists(train_path)
+    test_data = _load_pickle_if_exists(test_path)
+    all_train = _load_pickle_if_exists(all_train_path)
+
+    if test_data is None:
+        raise FileNotFoundError(f"测试集不存在: {test_path}")
+
+    if train_data is None:
+        train_data = test_data
+        logging.warning(f"训练集不存在: {train_path}，临时使用测试集作为训练集以保证代码可运行")
+
+    if all_train is None:
+        all_train = _extract_sessions(train_data)
+        logging.warning(f"all_train_seq不存在: {all_train_path}，已从训练数据自动构建")
+
+    logging.info(f"数据加载路径 train={train_path}")
+    logging.info(f"数据加载路径 test={test_path}")
+    logging.info(f"数据加载路径 all_train={all_train_path if os.path.exists(all_train_path) else '[auto-generated]'}")
+    return train_data, test_data, all_train
+
+
 def main():
     logging.info("=" * 60)
     logging.info("开始加载数据...")
 
-    train_data = pickle.load(open('datasets/' + opt.dataset + '/train.txt', 'rb'))
-    test_data = pickle.load(open('datasets/' + opt.dataset + '/test.txt', 'rb'))
-    all_train = pickle.load(open('datasets/' + opt.dataset + '/all_train_seq.txt', 'rb'))
+    train_data, test_data, all_train = _load_data_bundle()
 
     if opt.dataset == 'Tmall':
         n_node = 40727
@@ -103,6 +183,8 @@ def main():
         n_node = 18888
     else:
         n_node = 309
+
+    n_node = _infer_n_node(train_data, test_data, all_train, n_node)
 
     logging.info(f"数据集: {opt.dataset}, 节点数: {n_node}")
 

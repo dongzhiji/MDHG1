@@ -98,6 +98,13 @@ class MDHG(Module):
 
         self.adj1 = torch.cuda.FloatTensor(adj1) if torch.cuda.is_available() else torch.FloatTensor(adj1)
         self.adj2 = torch.cuda.FloatTensor(adj2) if torch.cuda.is_available() else torch.FloatTensor(adj2)
+        self.R = torch.cuda.FloatTensor(R) if torch.cuda.is_available() else torch.FloatTensor(R)
+        self.R = self.R.reshape(-1)
+        if self.R.numel() < self.n_node:
+            pad = torch.zeros(self.n_node - self.R.numel(), device=self.R.device)
+            self.R = torch.cat([self.R, pad], dim=0)
+        elif self.R.numel() > self.n_node:
+            self.R = self.R[:self.n_node]
         self.R1 = torch.cuda.FloatTensor(R1) if torch.cuda.is_available() else torch.FloatTensor(R1)
         self.adj1_fuzzy = torch.cuda.FloatTensor(adj1_fuzzy) if torch.cuda.is_available() else torch.FloatTensor(adj1_fuzzy)
         self.adj2_fuzzy = torch.cuda.FloatTensor(adj2_fuzzy) if torch.cuda.is_available() else torch.FloatTensor(adj2_fuzzy)
@@ -165,6 +172,9 @@ class MDHG(Module):
         self.soft_label_smooth_min = 0.02
         self.soft_label_smooth_gain = 0.08
         self.soft_label_smooth_max = 0.06
+        self.pop_debias_base = 0.03
+        self.pop_debias_entropy_gain = 0.12
+        self.pop_debias_max = 0.16
 
         self.label_smoothing = 0.06
         self.bpr_loss_weight = 0.18
@@ -174,6 +184,8 @@ class MDHG(Module):
         self.short_len_factor_min = short_len_factor_min
         self.topk_hardneg = 100
         self.score_temperature = 0.85
+        self.item_pop_log_prior = torch.log1p(torch.clamp(self.R, min=0.0))
+        self.item_pop_log_prior = self.item_pop_log_prior / torch.clamp(self.item_pop_log_prior.mean(), min=self.numerical_eps)
         self.init_parameters()
 
     def init_parameters(self):
@@ -246,6 +258,16 @@ class MDHG(Module):
         score = torch.softmax(raw_weights, dim=-1)
         mixed = score[:, 0:1] * h1 + score[:, 1:2] * h2 + score[:, 2:3] * h3
         return mixed, score
+
+    # 机制5：不确定性感知流行度去偏（抑制热门项过拟合）
+    def apply_popularity_debias(self, scores_item, gate):
+        entropy = -torch.sum(gate * torch.log(gate + 1e-8), dim=1, keepdim=True) / math.log(3.0)
+        gamma = torch.clamp(
+            self.pop_debias_base + self.pop_debias_entropy_gain * entropy,
+            min=self.pop_debias_base,
+            max=self.pop_debias_max
+        )
+        return scores_item - gamma * self.item_pop_log_prior.unsqueeze(0)
 
     def fuse_session_views(self, s1, s2, s3, gate):
         gate = gate / (gate.sum(dim=1, keepdim=True) + 1e-8)
@@ -470,6 +492,7 @@ class MDHG(Module):
 
         # temperature scaling for better ranking sharpness
         scores_item = scores_item / self.score_temperature
+        scores_item = self.apply_popularity_debias(scores_item, gate)
 
         tar_safe = torch.clamp(tar, min=0, max=item_mix.size(0) - 1)
         ce_loss = self.ce_with_label_smoothing(scores_item, tar_safe, smooth=self.label_smoothing)
