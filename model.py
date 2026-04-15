@@ -184,8 +184,9 @@ class MDHG(Module):
         self.short_len_factor_min = short_len_factor_min
         self.topk_hardneg = 100
         self.score_temperature = 0.85
-        self.item_pop_log_prior = torch.log1p(torch.clamp(self.R, min=0.0))
-        self.item_pop_log_prior = self.item_pop_log_prior / torch.clamp(self.item_pop_log_prior.mean(), min=self.numerical_eps)
+        item_pop_log_prior = torch.log1p(torch.clamp(self.R, min=0.0))
+        item_pop_log_prior = item_pop_log_prior / torch.clamp(item_pop_log_prior.mean(), min=self.numerical_eps)
+        self.register_buffer('item_pop_log_prior', item_pop_log_prior)
         self.init_parameters()
 
     def init_parameters(self):
