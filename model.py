@@ -261,7 +261,7 @@ class MDHG(Module):
 
     # 机制5：不确定性感知流行度去偏（抑制热门项过拟合）
     def apply_popularity_debias(self, scores_item, gate):
-        entropy = -torch.sum(gate * torch.log(gate + 1e-8), dim=1, keepdim=True) / math.log(3.0)
+        entropy = -torch.sum(gate * torch.log(gate + self.numerical_eps), dim=1, keepdim=True) / math.log(3.0)
         gamma = torch.clamp(
             self.pop_debias_base + self.pop_debias_entropy_gain * entropy,
             min=self.pop_debias_base,
