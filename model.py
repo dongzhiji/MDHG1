@@ -76,7 +76,9 @@ class MDHG(Module):
                  adjacency_fuzzy, adjacency_T_fuzzy, adjacency1_fuzzy,
                  adj1_fuzzy, adj2_fuzzy, R_fuzzy, R1_fuzzy,
                  n_node, lr, layers, l2, beta, lam, eps, dataset,
-                 K1, K2, K3, dropout, alpha, emb_size=100, batch_size=100):
+                 K1, K2, K3, dropout, alpha, emb_size=100, batch_size=100,
+                 intent_align_weight=0.03, short_intent_min=0.10, short_intent_max=0.45,
+                 short_len_factor_min=0.35):
         super(MDHG, self).__init__()
         self.emb_size = emb_size
         self.batch_size = batch_size
@@ -136,6 +138,11 @@ class MDHG(Module):
         )
         self.gate_dropout = nn.Dropout(p=0.05)
         self.final_dropout = nn.Dropout(p=0.1)
+        self.short_intent_mlp = nn.Sequential(
+            nn.Linear(2 * self.emb_size, self.emb_size),
+            nn.ReLU(),
+            nn.Linear(self.emb_size, 1)
+        )
 
         self.loss_function = nn.CrossEntropyLoss()
         self.optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
@@ -161,6 +168,10 @@ class MDHG(Module):
 
         self.label_smoothing = 0.06
         self.bpr_loss_weight = 0.18
+        self.intent_align_weight = intent_align_weight
+        self.short_intent_min = short_intent_min
+        self.short_intent_max = short_intent_max
+        self.short_len_factor_min = short_len_factor_min
         self.topk_hardneg = 100
         self.score_temperature = 0.85
         self.init_parameters()
@@ -432,19 +443,44 @@ class MDHG(Module):
         gate = gate / (gate.sum(dim=1, keepdim=True) + 1e-8)
 
         sf = self.fuse_session_views(s1, s2, s3, gate)
+        sf_base = sf
+
+        last_item_ids = reversed_sess_item[:, 0]
+        valid_last = (last_item_ids > 0)
+        last_item_emb = torch.zeros(session_item.size(0), self.emb_size, device=item_mix.device)
+        if valid_last.any():
+            last_item_pos = torch.clamp(last_item_ids[valid_last] - 1, min=0, max=self.n_node - 1)
+            last_item_emb[valid_last] = item_mix[last_item_pos]
+        len_factor = torch.clamp(
+            1.0 / torch.sqrt(session_len.float().squeeze(-1).clamp(min=1.0)),
+            min=self.short_len_factor_min, max=1.0
+        ).unsqueeze(1)
+        short_gate = torch.sigmoid(self.short_intent_mlp(torch.cat([sf, last_item_emb], dim=1)))
+        short_gate = self.short_intent_min + (self.short_intent_max - self.short_intent_min) * short_gate * len_factor
+        short_gate = short_gate * valid_last.float().unsqueeze(1)
+        sf = (1.0 - short_gate) * sf + short_gate * last_item_emb
+
         if train:
             sf = self.final_dropout(sf)
 
-        sf = self.w_k * F.normalize(sf, dim=-1)
+        sf_norm = F.normalize(sf, dim=-1)
+        sf = self.w_k * sf_norm
         item_mix = F.normalize(item_mix, dim=-1)
         scores_item = torch.mm(sf, item_mix.t())
 
         # temperature scaling for better ranking sharpness
         scores_item = scores_item / self.score_temperature
 
-        ce_loss = self.ce_with_label_smoothing(scores_item, tar, smooth=self.label_smoothing)
-        bpr_loss = self.bpr_hard_negative_loss(scores_item, tar, topk=self.topk_hardneg)
-        loss_item = ce_loss + self.bpr_loss_weight * bpr_loss
+        tar_safe = torch.clamp(tar, min=0, max=item_mix.size(0) - 1)
+        ce_loss = self.ce_with_label_smoothing(scores_item, tar_safe, smooth=self.label_smoothing)
+        bpr_loss = self.bpr_hard_negative_loss(scores_item, tar_safe, topk=self.topk_hardneg)
+        if train:
+            sf_base_norm = F.normalize(sf_base, dim=-1)
+            target_item_emb = item_mix[tar_safe]
+            intent_align_loss = (1.0 - F.cosine_similarity(sf_base_norm, target_item_emb, dim=-1)).mean()
+        else:
+            intent_align_loss = torch.tensor(0.0, device=scores_item.device)
+        loss_item = ce_loss + self.bpr_loss_weight * bpr_loss + self.intent_align_weight * intent_align_loss
         con_loss = torch.tensor(0.0, device=scores_item.device)
 
         if train:
