@@ -49,6 +49,11 @@ parser.add_argument('--intent_align_weight', type=float, default=0.03, help='wei
 parser.add_argument('--short_intent_min', type=float, default=0.10, help='minimum short-term intent fusion gate')
 parser.add_argument('--short_intent_max', type=float, default=0.45, help='maximum short-term intent fusion gate')
 parser.add_argument('--short_len_factor_min', type=float, default=0.35, help='minimum session-length factor in short-term intent fusion')
+parser.add_argument('--contrastive_weight', type=float, default=0.05, help='weight of contrastive learning loss')
+parser.add_argument('--contrastive_temp', type=float, default=0.2, help='temperature of contrastive learning loss')
+parser.add_argument('--train_file', type=str, default=None, help='optional absolute/relative path to train pickle')
+parser.add_argument('--test_file', type=str, default=None, help='optional absolute/relative path to test pickle')
+parser.add_argument('--all_train_file', type=str, default=None, help='optional absolute/relative path to all-train pickle')
 
 opt = parser.parse_args()
 
@@ -91,15 +96,41 @@ def main():
     logging.info("=" * 60)
     logging.info("开始加载数据...")
 
-    train_data = pickle.load(open('datasets/' + opt.dataset + '/train.txt', 'rb'))
-    test_data = pickle.load(open('datasets/' + opt.dataset + '/test.txt', 'rb'))
-    all_train = pickle.load(open('datasets/' + opt.dataset + '/all_train_seq.txt', 'rb'))
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    dataset_key = opt.dataset.lower()
+    dataset_dirs = [
+        os.path.join(repo_root, 'datasets', opt.dataset),
+        os.path.join(repo_root, 'datasets', dataset_key)
+    ]
 
-    if opt.dataset == 'Tmall':
+    def resolve_data_file(cli_value, default_name, add_root_test_fallback=False):
+        if cli_value:
+            return cli_value if os.path.isabs(cli_value) else os.path.join(repo_root, cli_value)
+        candidates = [os.path.join(d, default_name) for d in dataset_dirs]
+        if add_root_test_fallback:
+            candidates.append(os.path.join(repo_root, 'test.txt'))
+        for cand in candidates:
+            if os.path.exists(cand):
+                return cand
+        raise FileNotFoundError(f'Cannot find {default_name}. Checked: {candidates}')
+
+    train_path = resolve_data_file(opt.train_file, 'train.txt')
+    test_path = resolve_data_file(opt.test_file, 'test.txt', add_root_test_fallback=(dataset_key == 'retailrocket'))
+    all_train_path = resolve_data_file(opt.all_train_file, 'all_train_seq.txt')
+
+    logging.info(f"train file: {train_path}")
+    logging.info(f"test file: {test_path}")
+    logging.info(f"all-train file: {all_train_path}")
+
+    train_data = pickle.load(open(train_path, 'rb'))
+    test_data = pickle.load(open(test_path, 'rb'))
+    all_train = pickle.load(open(all_train_path, 'rb'))
+
+    if dataset_key == 'tmall':
         n_node = 40727
-    elif opt.dataset == 'retailrocket':
+    elif dataset_key == 'retailrocket':
         n_node = 36968
-    elif opt.dataset == 'amazon':
+    elif dataset_key == 'amazon':
         n_node = 18888
     else:
         n_node = 309
@@ -143,7 +174,9 @@ def main():
         intent_align_weight=opt.intent_align_weight,
         short_intent_min=opt.short_intent_min,
         short_intent_max=opt.short_intent_max,
-        short_len_factor_min=opt.short_len_factor_min
+        short_len_factor_min=opt.short_len_factor_min,
+        contrastive_weight=opt.contrastive_weight,
+        contrastive_temp=opt.contrastive_temp
     ))
 
     #reset_parameters(model)

@@ -78,7 +78,7 @@ class MDHG(Module):
                  n_node, lr, layers, l2, beta, lam, eps, dataset,
                  K1, K2, K3, dropout, alpha, emb_size=100, batch_size=100,
                  intent_align_weight=0.03, short_intent_min=0.10, short_intent_max=0.45,
-                 short_len_factor_min=0.35):
+                 short_len_factor_min=0.35, contrastive_weight=0.05, contrastive_temp=0.2):
         super(MDHG, self).__init__()
         self.emb_size = emb_size
         self.batch_size = batch_size
@@ -174,6 +174,8 @@ class MDHG(Module):
         self.short_len_factor_min = short_len_factor_min
         self.topk_hardneg = 100
         self.score_temperature = 0.85
+        self.contrastive_weight = contrastive_weight
+        self.contrastive_temp = contrastive_temp
         self.init_parameters()
 
     def init_parameters(self):
@@ -401,6 +403,15 @@ class MDHG(Module):
         factor = min((epoch - self.warmup_epochs + 1) / span, 1.0)
         return self.max_fuzzy_factor * factor
 
+    def info_nce_loss(self, z1, z2):
+        if z1.size(0) <= 1:
+            return torch.tensor(0.0, device=z1.device)
+        z1 = F.normalize(z1, dim=-1)
+        z2 = F.normalize(z2, dim=-1)
+        logits = torch.mm(z1, z2.t()) / max(self.contrastive_temp, 1e-8)
+        labels = torch.arange(z1.size(0), device=z1.device)
+        return 0.5 * (F.cross_entropy(logits, labels) + F.cross_entropy(logits.t(), labels))
+
     def forward(self, session_item, session_len, reversed_sess_item, reversed_sess_event, mask, epoch, tar, train):
         repeat_ratio = self.calc_repeat_ratio_batch(session_item)
         fuzzy_strength = (0.20 + 0.45 * torch.clamp(repeat_ratio / 0.3, max=1.0)).unsqueeze(1)
@@ -481,7 +492,13 @@ class MDHG(Module):
         else:
             intent_align_loss = torch.tensor(0.0, device=scores_item.device)
         loss_item = ce_loss + self.bpr_loss_weight * bpr_loss + self.intent_align_weight * intent_align_loss
-        con_loss = torch.tensor(0.0, device=scores_item.device)
+        if train:
+            cl12 = self.info_nce_loss(s1, s2)
+            cl13 = self.info_nce_loss(s1, s3)
+            cl23 = self.info_nce_loss(s2, s3)
+            con_loss = self.contrastive_weight * (cl12 + cl13 + cl23) / 3.0
+        else:
+            con_loss = torch.tensor(0.0, device=scores_item.device)
 
         if train:
             fuzzy_raw = self.compute_fuzzy_losses(scores_item, tar, s1, s2, s3, sf, gate)
