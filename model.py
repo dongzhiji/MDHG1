@@ -175,6 +175,8 @@ class MDHG(Module):
         self.topk_hardneg = 100
         self.score_temperature = 0.85
         self.contrastive_weight = contrastive_weight
+        if contrastive_temp <= 0:
+            raise ValueError('contrastive_temp must be > 0')
         self.contrastive_temp = contrastive_temp
         self.init_parameters()
 
@@ -408,7 +410,7 @@ class MDHG(Module):
             return torch.tensor(0.0, device=z1.device)
         z1 = F.normalize(z1, dim=-1)
         z2 = F.normalize(z2, dim=-1)
-        logits = torch.mm(z1, z2.t()) / max(self.contrastive_temp, 1e-8)
+        logits = torch.mm(z1, z2.t()) / self.contrastive_temp
         labels = torch.arange(z1.size(0), device=z1.device)
         return 0.5 * (F.cross_entropy(logits, labels) + F.cross_entropy(logits.t(), labels))
 

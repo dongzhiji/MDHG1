@@ -14,5 +14,5 @@ python main.py --dataset=retailrocket
 python main.py --dataset=amazon
 
 # RetailRocket + custom test set (e.g. repo-root test.txt)
-python main.py --dataset=RetailRocket --test_file=/home/runner/work/MDHG1/MDHG1/test.txt
+python main.py --dataset=retailrocket --test_file=./test.txt
 ```
