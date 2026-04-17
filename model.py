@@ -201,8 +201,8 @@ class MDHG(Module):
         valid = session_item > 0
         lengths = valid.sum(dim=1).float()
         sorted_items, _ = torch.sort(session_item, dim=1)
-        first_position_mask = torch.ones(sorted_items.size(0), 1, dtype=torch.bool, device=sorted_items.device)
-        unique_item_mask = torch.cat([first_position_mask, sorted_items[:, 1:] != sorted_items[:, :-1]], dim=1)
+        first_col_true = torch.ones(sorted_items.size(0), 1, dtype=torch.bool, device=sorted_items.device)
+        unique_item_mask = torch.cat([first_col_true, sorted_items[:, 1:] != sorted_items[:, :-1]], dim=1)
         unique_counts = (unique_item_mask & (sorted_items > 0)).sum(dim=1).float()
         duplicate_counts = lengths - unique_counts
         zeros = torch.zeros_like(lengths)
@@ -542,16 +542,18 @@ def train_test(model, train_data, test_data, epoch):
             topk_index = torch.topk(scores_item, k=50, dim=1).indices
             index = trans_to_cpu(topk_index).detach().numpy()
             tar = trans_to_cpu(tar).detach().numpy()
+            mrr_vals = np.zeros(len(tar), dtype=np.float32)
+            ndcg_vals = np.zeros(len(tar), dtype=np.float32)
 
             for K in top_K:
                 pred_k = index[:, :K]
-                hit_matrix = (pred_k == tar.reshape(-1, 1))
-                hit_any = hit_matrix.any(axis=1)
+                target_match_matrix = (pred_k == tar.reshape(-1, 1))
+                hit_any = target_match_matrix.any(axis=1)
 
-                mrr_vals = np.zeros(len(tar), dtype=np.float32)
-                ndcg_vals = np.zeros(len(tar), dtype=np.float32)
+                mrr_vals.fill(0.0)
+                ndcg_vals.fill(0.0)
                 if np.any(hit_any):
-                    first_pos_hit = np.argmax(hit_matrix[hit_any], axis=1)
+                    first_pos_hit = np.argmax(target_match_matrix[hit_any], axis=1)
                     mrr_vals[hit_any] = 1.0 / (first_pos_hit + 1)
                     ndcg_vals[hit_any] = 1.0 / np.log2(first_pos_hit + 2)
 
