@@ -201,9 +201,9 @@ class MDHG(Module):
         valid = session_item > 0
         lengths = valid.sum(dim=1).float()
         sorted_items, _ = torch.sort(session_item, dim=1)
-        first_valid = torch.ones(sorted_items.size(0), 1, dtype=torch.bool, device=sorted_items.device)
-        is_new_value = torch.cat([first_valid, sorted_items[:, 1:] != sorted_items[:, :-1]], dim=1)
-        unique_counts = (is_new_value & (sorted_items > 0)).sum(dim=1).float()
+        first_position_mask = torch.ones(sorted_items.size(0), 1, dtype=torch.bool, device=sorted_items.device)
+        unique_item_mask = torch.cat([first_position_mask, sorted_items[:, 1:] != sorted_items[:, :-1]], dim=1)
+        unique_counts = (unique_item_mask & (sorted_items > 0)).sum(dim=1).float()
         duplicate_counts = lengths - unique_counts
         zeros = torch.zeros_like(lengths)
         return torch.where(lengths > 0, duplicate_counts / lengths, zeros)
@@ -547,12 +547,13 @@ def train_test(model, train_data, test_data, epoch):
                 pred_k = index[:, :K]
                 hit_matrix = (pred_k == tar.reshape(-1, 1))
                 hit_any = hit_matrix.any(axis=1)
-                first_pos = np.argmax(hit_matrix, axis=1)
 
                 mrr_vals = np.zeros(len(tar), dtype=np.float32)
                 ndcg_vals = np.zeros(len(tar), dtype=np.float32)
-                mrr_vals[hit_any] = 1.0 / (first_pos[hit_any] + 1)
-                ndcg_vals[hit_any] = 1.0 / np.log2(first_pos[hit_any] + 2)
+                if np.any(hit_any):
+                    first_pos_hit = np.argmax(hit_matrix[hit_any], axis=1)
+                    mrr_vals[hit_any] = 1.0 / (first_pos_hit + 1)
+                    ndcg_vals[hit_any] = 1.0 / np.log2(first_pos_hit + 2)
 
                 metrics['hit%d' % K].extend(hit_any.tolist())
                 metrics['mrr%d' % K].extend(mrr_vals.tolist())
