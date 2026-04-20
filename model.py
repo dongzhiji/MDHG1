@@ -88,7 +88,7 @@ class HyperGraphConv(Module):
             x = F.relu(x)
             x = self.dropout(x)
             outs.append(F.normalize(x, dim=-1, p=2))
-        return torch.sum(torch.stack(outs), 0) / max(len(outs), 1)
+        return torch.sum(torch.stack(outs), 0) / len(outs)
 
 
 class MDHG(Module):
@@ -214,6 +214,7 @@ class MDHG(Module):
         self.sub_weight_max = 0.75
         self.base_weight_min = 0.10
         self.base_weight_max = 0.70
+        self.comp_sub_pair_hyper_mix = 0.5
         self.init_parameters()
 
     def init_parameters(self):
@@ -474,8 +475,9 @@ class MDHG(Module):
         i_sub_pair, _ = self.ItemGraph(self.sub_deg, self.adjacency_sub, self.embedding3.weight, 2)
         i_comp_hyper = self.CompHyperGraph(self.hyper_comp, self.embedding3.weight)
         i_sub_hyper = self.SubHyperGraph(self.hyper_sub, self.embedding3.weight)
-        i_comp = 0.5 * (i_comp_pair + i_comp_hyper)
-        i_sub = 0.5 * (i_sub_pair + i_sub_hyper)
+        mix = self.comp_sub_pair_hyper_mix
+        i_comp = (1.0 - mix) * i_comp_pair + mix * i_comp_hyper
+        i_sub = (1.0 - mix) * i_sub_pair + mix * i_sub_hyper
         hyperedge_act = self.build_hyperedge_activation(session_item, reversed_sess_event)
         mean_hyperedge_activation = hyperedge_act.mean()
         item_hyper_prior_norm = self.normalize_item_prior(self.R_fuzzy)
