@@ -452,8 +452,9 @@ class MDHG(Module):
         mean_hyperedge_activation = hyperedge_act.mean()
         item_hyper_prior_norm = self.normalize_item_prior(self.R_fuzzy)
         i3 = mean_hyperedge_activation * i3_fuzzy + (1.0 - mean_hyperedge_activation) * i3_base
-        base_ratio, comp_ratio, sub_ratio = self.compute_comp_sub_weights(repeat_ratio.mean())
-        i3 = base_ratio * i3 + comp_ratio * i_comp + sub_ratio * i_sub
+        # item-level uses batch mean repeat ratio for stable global relation fusion
+        base_weight, comp_weight, sub_weight = self.compute_comp_sub_weights(repeat_ratio.mean())
+        i3 = base_weight * i3 + comp_weight * i_comp + sub_weight * i_sub
         i3 = i3 * ((1.0 - self.item_prior_mix) + self.item_prior_mix * item_hyper_prior_norm.unsqueeze(1))
         i1, i2, i3 = F.normalize(i1, dim=-1), F.normalize(i2, dim=-1), F.normalize(i3, dim=-1)
 
@@ -475,6 +476,7 @@ class MDHG(Module):
             s_sub = self.generate_sess_emb(i_sub, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
 
         s3 = hyperedge_act.unsqueeze(1) * s3_fuzzy + (1.0 - hyperedge_act.unsqueeze(1)) * s3_base
+        # session-level uses per-session repeat ratio for personalized relation fusion
         base_w, comp_w, sub_w = self.compute_comp_sub_weights(repeat_ratio)
         base_w, comp_w, sub_w = base_w.unsqueeze(1), comp_w.unsqueeze(1), sub_w.unsqueeze(1)
         s3 = base_w * s3 + comp_w * s_comp + sub_w * s_sub

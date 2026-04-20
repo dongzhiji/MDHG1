@@ -266,9 +266,18 @@ def _dict_to_coo_with_self_loop(adj, n_node, self_loop=1.0):
 
 def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3):
     """
-    Build item-view hypergraph relations learned from sessions:
-      1) complementary relation: ordered co-occurrence in short window
-      2) substitute relation: items sharing similar context (same previous/next item)
+    Build item-view hypergraph relations learned from sessions.
+
+    Args:
+        all_sessions: list of session item sequences.
+        n_node: total number of items.
+        max_gap: maximum distance window for complementary relation extraction.
+
+    Returns:
+        A tuple (comp_adj, sub_adj) where each entry is a scipy COO sparse matrix
+        with shape [n_node, n_node]:
+          - comp_adj: complementary item relation graph.
+          - sub_adj: substitute item relation graph.
     """
     comp_adj = dict()
     sub_adj = dict()
@@ -276,8 +285,8 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3):
     next_to_prev = dict()
     dist_weights = [1.0 / d for d in range(1, max_gap + 1)]
 
-    def context_pair_weight(ca, cb):
-        return (ca * cb) / (ca + cb + 1e-8)
+    def context_pair_weight(count_a, count_b):
+        return (count_a * count_b) / (count_a + count_b + 1e-8)
 
     for sess in all_sessions:
         seq = [x - 1 for x in sess if x != 0 and 1 <= x <= n_node]
