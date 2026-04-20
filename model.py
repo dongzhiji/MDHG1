@@ -98,7 +98,7 @@ class MDHG(Module):
                  n_node, lr, layers, l2, beta, lam, eps, dataset,
                  K1, K2, K3, dropout, alpha, emb_size=100, batch_size=100,
                  intent_align_weight=0.03, short_intent_min=0.10, short_intent_max=0.45,
-                 short_len_factor_min=0.35):
+                 short_len_factor_min=0.35, comp_sub_pair_hyper_mix=0.5):
         super(MDHG, self).__init__()
         self.emb_size = emb_size
         self.batch_size = batch_size
@@ -214,7 +214,7 @@ class MDHG(Module):
         self.sub_weight_max = 0.75
         self.base_weight_min = 0.10
         self.base_weight_max = 0.70
-        self.comp_sub_pair_hyper_mix = 0.5
+        self.comp_sub_pair_hyper_mix = comp_sub_pair_hyper_mix
         self.init_parameters()
 
     def init_parameters(self):
@@ -475,9 +475,9 @@ class MDHG(Module):
         i_sub_pair, _ = self.ItemGraph(self.sub_deg, self.adjacency_sub, self.embedding3.weight, 2)
         i_comp_hyper = self.CompHyperGraph(self.hyper_comp, self.embedding3.weight)
         i_sub_hyper = self.SubHyperGraph(self.hyper_sub, self.embedding3.weight)
-        mix = self.comp_sub_pair_hyper_mix
-        i_comp = (1.0 - mix) * i_comp_pair + mix * i_comp_hyper
-        i_sub = (1.0 - mix) * i_sub_pair + mix * i_sub_hyper
+        pair_hyper_blend_ratio = self.comp_sub_pair_hyper_mix
+        i_comp = (1.0 - pair_hyper_blend_ratio) * i_comp_pair + pair_hyper_blend_ratio * i_comp_hyper
+        i_sub = (1.0 - pair_hyper_blend_ratio) * i_sub_pair + pair_hyper_blend_ratio * i_sub_hyper
         hyperedge_act = self.build_hyperedge_activation(session_item, reversed_sess_event)
         mean_hyperedge_activation = hyperedge_act.mean()
         item_hyper_prior_norm = self.normalize_item_prior(self.R_fuzzy)
