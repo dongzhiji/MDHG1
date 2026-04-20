@@ -178,6 +178,18 @@ class MDHG(Module):
         self.short_len_factor_min = short_len_factor_min
         self.topk_hardneg = 100
         self.score_temperature = 0.85
+
+        # item-view complementary/substitute fusion weights
+        self.comp_weight_base = 0.60
+        self.comp_weight_decay = 0.35
+        self.sub_weight_base = 0.25
+        self.sub_weight_gain = 0.45
+        self.comp_weight_min = 0.15
+        self.comp_weight_max = 0.70
+        self.sub_weight_min = 0.15
+        self.sub_weight_max = 0.75
+        self.base_weight_min = 0.10
+        self.base_weight_max = 0.70
         self.init_parameters()
 
     def init_parameters(self):
@@ -239,6 +251,25 @@ class MDHG(Module):
         """Normalize item prior tensor by mean value with numerical-stability epsilon."""
         scale = torch.clamp(prior.abs().mean(), min=self.numerical_eps)
         return prior / scale
+
+    def compute_comp_sub_weights(self, repeat_ratio):
+        comp_w = torch.clamp(
+            self.comp_weight_base - self.comp_weight_decay * repeat_ratio,
+            min=self.comp_weight_min,
+            max=self.comp_weight_max
+        )
+        sub_w = torch.clamp(
+            self.sub_weight_base + self.sub_weight_gain * repeat_ratio,
+            min=self.sub_weight_min,
+            max=self.sub_weight_max
+        )
+        base_w = torch.clamp(
+            1.0 - comp_w - sub_w,
+            min=self.base_weight_min,
+            max=self.base_weight_max
+        )
+        w_sum = base_w + comp_w + sub_w + 1e-8
+        return base_w / w_sum, comp_w / w_sum, sub_w / w_sum
 
     def fuzzy_cross_view(self, h1, h2, h3):
         channel_embeddings = [h1, h2, h3]
@@ -421,13 +452,8 @@ class MDHG(Module):
         mean_hyperedge_activation = hyperedge_act.mean()
         item_hyper_prior_norm = self.normalize_item_prior(self.R_fuzzy)
         i3 = mean_hyperedge_activation * i3_fuzzy + (1.0 - mean_hyperedge_activation) * i3_base
-        comp_ratio = torch.clamp(0.60 - 0.35 * repeat_ratio.mean(), min=0.15, max=0.70)
-        sub_ratio = torch.clamp(0.25 + 0.45 * repeat_ratio.mean(), min=0.15, max=0.75)
-        base_ratio = torch.clamp(1.0 - comp_ratio - sub_ratio, min=0.10, max=0.70)
-        ratio_norm = base_ratio + comp_ratio + sub_ratio + 1e-8
-        base_ratio = base_ratio / ratio_norm
-        comp_ratio = comp_ratio / ratio_norm
-        sub_ratio = sub_ratio / ratio_norm
+        base_ratio, comp_ratio, sub_ratio = self.compute_comp_sub_weights(repeat_ratio.mean().unsqueeze(0))
+        base_ratio, comp_ratio, sub_ratio = base_ratio.squeeze(0), comp_ratio.squeeze(0), sub_ratio.squeeze(0)
         i3 = base_ratio * i3 + comp_ratio * i_comp + sub_ratio * i_sub
         i3 = i3 * ((1.0 - self.item_prior_mix) + self.item_prior_mix * item_hyper_prior_norm.unsqueeze(1))
         i1, i2, i3 = F.normalize(i1, dim=-1), F.normalize(i2, dim=-1), F.normalize(i3, dim=-1)
@@ -450,11 +476,8 @@ class MDHG(Module):
             s_sub = self.generate_sess_emb(i_sub, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
 
         s3 = hyperedge_act.unsqueeze(1) * s3_fuzzy + (1.0 - hyperedge_act.unsqueeze(1)) * s3_base
-        comp_w = torch.clamp(0.60 - 0.35 * repeat_ratio, min=0.15, max=0.70).unsqueeze(1)
-        sub_w = torch.clamp(0.25 + 0.45 * repeat_ratio, min=0.15, max=0.75).unsqueeze(1)
-        base_w = torch.clamp(1.0 - comp_w - sub_w, min=0.10, max=0.70)
-        w_sum = base_w + comp_w + sub_w + 1e-8
-        base_w, comp_w, sub_w = base_w / w_sum, comp_w / w_sum, sub_w / w_sum
+        base_w, comp_w, sub_w = self.compute_comp_sub_weights(repeat_ratio)
+        base_w, comp_w, sub_w = base_w.unsqueeze(1), comp_w.unsqueeze(1), sub_w.unsqueeze(1)
         s3 = base_w * s3 + comp_w * s_comp + sub_w * s_sub
 
         prior_gate = self.build_fuzzy_relation_prior(session_item, reversed_sess_event)

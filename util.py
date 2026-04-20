@@ -304,8 +304,12 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3):
                 prev_to_next[p] = dict()
             if n not in next_to_prev:
                 next_to_prev[n] = dict()
-            prev_to_next[p][n] = prev_to_next[p].get(n, 0.0) + 1.0
-            next_to_prev[n][p] = next_to_prev[n].get(p, 0.0) + 1.0
+            if n not in prev_to_next[p]:
+                prev_to_next[p][n] = 0.0
+            if p not in next_to_prev[n]:
+                next_to_prev[n][p] = 0.0
+            prev_to_next[p][n] += 1.0
+            next_to_prev[n][p] += 1.0
 
     def add_sub_pair(i, j, w):
         if i == j:
