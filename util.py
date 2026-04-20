@@ -353,7 +353,7 @@ def _normalize_relation_graph(rel_adj, item_freq, min_support=1.0, min_norm_weig
             dst_freq = item_freq[dst]
             if dst_freq <= 0:
                 continue
-            norm_w = float(weight / (np.sqrt(src_freq * dst_freq) + EPSILON))
+            norm_w = float(weight / np.sqrt(src_freq * dst_freq + EPSILON))
             if norm_w < min_norm_weight:
                 continue
             if src not in normalized:
@@ -436,7 +436,9 @@ def data_item_hypergraph_comp_sub(
 
     # substitute: different items competing under same previous context
     for _, nxt_dict in prev_to_next.items():
-        items = sorted(nxt_dict.items(), key=lambda x: x[1], reverse=True)[:sub_context_topk]
+        items = sorted(
+            nxt_dict.items(), key=lambda item_count_pair: item_count_pair[1], reverse=True
+        )[:sub_context_topk]
         if len(items) < sub_context_min:
             continue
         for a in range(len(items)):
@@ -449,7 +451,9 @@ def data_item_hypergraph_comp_sub(
 
     # substitute: different items leading to same next context
     for _, prv_dict in next_to_prev.items():
-        items = sorted(prv_dict.items(), key=lambda x: x[1], reverse=True)[:sub_context_topk]
+        items = sorted(
+            prv_dict.items(), key=lambda item_count_pair: item_count_pair[1], reverse=True
+        )[:sub_context_topk]
         if len(items) < sub_context_min:
             continue
         for a in range(len(items)):
