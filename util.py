@@ -274,6 +274,10 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3):
     sub_adj = dict()
     prev_to_next = dict()
     next_to_prev = dict()
+    dist_weights = [1.0 / d for d in range(1, max_gap + 1)]
+
+    def context_pair_weight(ca, cb):
+        return (ca * cb) / (ca + cb + 1e-8)
 
     for sess in all_sessions:
         seq = [x - 1 for x in sess if x != 0 and 1 <= x <= n_node]
@@ -288,7 +292,7 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3):
                 dst = seq[j]
                 if src == dst:
                     continue
-                w = 1.0 / (j - i)
+                w = dist_weights[j - i - 1]
                 if src not in comp_adj:
                     comp_adj[src] = dict()
                 if dst not in comp_adj:
@@ -325,7 +329,7 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3):
             ia, ca = items[a]
             for b in range(a + 1, len(items)):
                 ib, cb = items[b]
-                w = (ca * cb) / (ca + cb + 1e-8)
+                w = context_pair_weight(ca, cb)
                 add_sub_pair(ia, ib, w)
                 add_sub_pair(ib, ia, w)
 
@@ -336,7 +340,7 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3):
             ia, ca = items[a]
             for b in range(a + 1, len(items)):
                 ib, cb = items[b]
-                w = (ca * cb) / (ca + cb + 1e-8)
+                w = context_pair_weight(ca, cb)
                 add_sub_pair(ia, ib, w)
                 add_sub_pair(ib, ia, w)
 

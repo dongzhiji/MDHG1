@@ -268,7 +268,7 @@ class MDHG(Module):
             min=self.base_weight_min,
             max=self.base_weight_max
         )
-        w_sum = base_w + comp_w + sub_w + 1e-8
+        w_sum = torch.clamp(base_w + comp_w + sub_w, min=1e-8)
         return base_w / w_sum, comp_w / w_sum, sub_w / w_sum
 
     def fuzzy_cross_view(self, h1, h2, h3):
@@ -452,8 +452,7 @@ class MDHG(Module):
         mean_hyperedge_activation = hyperedge_act.mean()
         item_hyper_prior_norm = self.normalize_item_prior(self.R_fuzzy)
         i3 = mean_hyperedge_activation * i3_fuzzy + (1.0 - mean_hyperedge_activation) * i3_base
-        base_ratio, comp_ratio, sub_ratio = self.compute_comp_sub_weights(repeat_ratio.mean().unsqueeze(0))
-        base_ratio, comp_ratio, sub_ratio = base_ratio.squeeze(0), comp_ratio.squeeze(0), sub_ratio.squeeze(0)
+        base_ratio, comp_ratio, sub_ratio = self.compute_comp_sub_weights(repeat_ratio.mean())
         i3 = base_ratio * i3 + comp_ratio * i_comp + sub_ratio * i_sub
         i3 = i3 * ((1.0 - self.item_prior_mix) + self.item_prior_mix * item_hyper_prior_norm.unsqueeze(1))
         i1, i2, i3 = F.normalize(i1, dim=-1), F.normalize(i2, dim=-1), F.normalize(i3, dim=-1)
