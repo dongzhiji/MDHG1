@@ -242,6 +242,105 @@ def data_R1_fuzzy(all_sessions, n_node, all_events=None):
     return coo_matrix((data, (row, col)), shape=(n_node, n_node))
 
 
+def _dict_to_coo_with_self_loop(adj, n_node, self_loop=1.0):
+    for i in range(n_node):
+        if i not in adj:
+            adj[i] = dict()
+        if i not in adj[i]:
+            adj[i][i] = self_loop
+
+    row, col, data = [], [], []
+    for i in adj:
+        for j, v in adj[i].items():
+            if 0 <= i < n_node and 0 <= j < n_node:
+                row.append(i)
+                col.append(j)
+                data.append(v)
+
+    if len(row) == 0:
+        row = list(range(n_node))
+        col = list(range(n_node))
+        data = [self_loop] * n_node
+    return coo_matrix((data, (row, col)), shape=(n_node, n_node))
+
+
+def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3):
+    """
+    Build item-view hypergraph relations learned from sessions:
+      1) complementary relation: ordered co-occurrence in short window
+      2) substitute relation: items sharing similar context (same previous/next item)
+    """
+    comp_adj = dict()
+    sub_adj = dict()
+    prev_to_next = dict()
+    next_to_prev = dict()
+
+    for sess in all_sessions:
+        seq = [x - 1 for x in sess if x != 0 and 1 <= x <= n_node]
+        if len(seq) <= 1:
+            continue
+
+        # complementary: close-by ordered co-occurrence in the same session
+        for i in range(len(seq)):
+            src = seq[i]
+            right = min(len(seq), i + 1 + max_gap)
+            for j in range(i + 1, right):
+                dst = seq[j]
+                if src == dst:
+                    continue
+                w = 1.0 / (j - i)
+                if src not in comp_adj:
+                    comp_adj[src] = dict()
+                if dst not in comp_adj:
+                    comp_adj[dst] = dict()
+                comp_adj[src][dst] = comp_adj[src].get(dst, 0.0) + w
+                comp_adj[dst][src] = comp_adj[dst].get(src, 0.0) + w
+
+        # contexts for substitute learning
+        for i in range(len(seq) - 1):
+            p = seq[i]
+            n = seq[i + 1]
+            if p not in prev_to_next:
+                prev_to_next[p] = dict()
+            if n not in next_to_prev:
+                next_to_prev[n] = dict()
+            prev_to_next[p][n] = prev_to_next[p].get(n, 0.0) + 1.0
+            next_to_prev[n][p] = next_to_prev[n].get(p, 0.0) + 1.0
+
+    def add_sub_pair(i, j, w):
+        if i == j:
+            return
+        if i not in sub_adj:
+            sub_adj[i] = dict()
+        sub_adj[i][j] = sub_adj[i].get(j, 0.0) + w
+
+    # substitute: different items competing under same previous context
+    for _, nxt_dict in prev_to_next.items():
+        items = list(nxt_dict.items())
+        for a in range(len(items)):
+            ia, ca = items[a]
+            for b in range(a + 1, len(items)):
+                ib, cb = items[b]
+                w = (ca * cb) / (ca + cb + 1e-8)
+                add_sub_pair(ia, ib, w)
+                add_sub_pair(ib, ia, w)
+
+    # substitute: different items leading to same next context
+    for _, prv_dict in next_to_prev.items():
+        items = list(prv_dict.items())
+        for a in range(len(items)):
+            ia, ca = items[a]
+            for b in range(a + 1, len(items)):
+                ib, cb = items[b]
+                w = (ca * cb) / (ca + cb + 1e-8)
+                add_sub_pair(ia, ib, w)
+                add_sub_pair(ib, ia, w)
+
+    comp = _dict_to_coo_with_self_loop(comp_adj, n_node, self_loop=1.0)
+    sub = _dict_to_coo_with_self_loop(sub_adj, n_node, self_loop=1.0)
+    return comp, sub
+
+
 class Data():
     def __init__(self, data, all_train, shuffle=False, n_node=None):
         if isinstance(data, tuple):
@@ -275,10 +374,13 @@ class Data():
             adj_fuzzy = data_masks_fuzzy(all_train_items, n_node, all_events=all_train_events)
             R_fuzzy = data_R_fuzzy(all_train_items, n_node, all_events=all_train_events)
             R1_fuzzy = data_R1_fuzzy(all_train_items, n_node, all_events=all_train_events)
+            comp_adj, sub_adj = data_item_hypergraph_comp_sub(all_train_items, n_node)
 
             self.adjacency = adj.multiply(1.0 / (adj.sum(axis=0).reshape(1, -1) + 1e-8))
             self.adjacency_T = self.adjacency.T
             self.adjacency1 = R1.multiply(1.0 / (R1.sum(axis=0).reshape(1, -1) + 1e-8))
+            self.adjacency_comp = comp_adj.multiply(1.0 / (comp_adj.sum(axis=0).reshape(1, -1) + 1e-8))
+            self.adjacency_sub = sub_adj.multiply(1.0 / (sub_adj.sum(axis=0).reshape(1, -1) + 1e-8))
 
             self.adjacency_fuzzy = adj_fuzzy.multiply(1.0 / (adj_fuzzy.sum(axis=0).reshape(1, -1) + 1e-8))
             self.adjacency_T_fuzzy = self.adjacency_fuzzy.T
@@ -293,6 +395,8 @@ class Data():
             self.adj2_fuzzy = adj_fuzzy.sum(axis=1).reshape(1, -1)
             self.R_fuzzy = R_fuzzy.sum(axis=0).reshape(1, -1)
             self.R1_fuzzy = R1_fuzzy.sum(axis=0).reshape(1, -1)
+            self.comp_deg = comp_adj.sum(axis=0).reshape(1, -1)
+            self.sub_deg = sub_adj.sum(axis=0).reshape(1, -1)
 
         self.n_node = n_node
         self.length = len(self.raw_items)

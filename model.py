@@ -72,7 +72,7 @@ class ItemConv(Module):
 
 
 class MDHG(Module):
-    def __init__(self, R, adj1, adj2, adjacency, adjacency_T, adjacency1, R1,
+    def __init__(self, R, adj1, adj2, adjacency, adjacency_T, adjacency1, adjacency_comp, adjacency_sub, R1, comp_deg, sub_deg,
                  adjacency_fuzzy, adjacency_T_fuzzy, adjacency1_fuzzy,
                  adj1_fuzzy, adj2_fuzzy, R_fuzzy, R1_fuzzy,
                  n_node, lr, layers, l2, beta, lam, eps, dataset,
@@ -92,6 +92,8 @@ class MDHG(Module):
         self.adjacency = trans_to_cuda(self.trans_adj(adjacency))
         self.adjacency_T = trans_to_cuda(self.trans_adj(adjacency_T))
         self.adjacency1 = trans_to_cuda(self.trans_adj(adjacency1))
+        self.adjacency_comp = trans_to_cuda(self.trans_adj(adjacency_comp))
+        self.adjacency_sub = trans_to_cuda(self.trans_adj(adjacency_sub))
         self.adjacency_fuzzy = trans_to_cuda(self.trans_adj(adjacency_fuzzy))
         self.adjacency_T_fuzzy = trans_to_cuda(self.trans_adj(adjacency_T_fuzzy))
         self.adjacency1_fuzzy = trans_to_cuda(self.trans_adj(adjacency1_fuzzy))
@@ -102,6 +104,8 @@ class MDHG(Module):
         self.adj1_fuzzy = torch.cuda.FloatTensor(adj1_fuzzy) if torch.cuda.is_available() else torch.FloatTensor(adj1_fuzzy)
         self.adj2_fuzzy = torch.cuda.FloatTensor(adj2_fuzzy) if torch.cuda.is_available() else torch.FloatTensor(adj2_fuzzy)
         self.R_fuzzy = torch.cuda.FloatTensor(R_fuzzy) if torch.cuda.is_available() else torch.FloatTensor(R_fuzzy)
+        self.comp_deg = torch.cuda.FloatTensor(comp_deg) if torch.cuda.is_available() else torch.FloatTensor(comp_deg)
+        self.sub_deg = torch.cuda.FloatTensor(sub_deg) if torch.cuda.is_available() else torch.FloatTensor(sub_deg)
         self.R_fuzzy = self.R_fuzzy.reshape(-1)
         if self.R_fuzzy.numel() < self.n_node:
             pad = torch.ones(self.n_node - self.R_fuzzy.numel(), device=self.R_fuzzy.device)
@@ -411,10 +415,20 @@ class MDHG(Module):
         i2, _ = self.ItemGraph(self.adj2_fuzzy, self.adjacency_T_fuzzy, self.embedding2.weight, 1)
         i3_base, _ = self.ItemGraph(self.R1, self.adjacency1, self.embedding3.weight, 2)
         i3_fuzzy, _ = self.ItemGraph(self.R1_fuzzy, self.adjacency1_fuzzy, self.embedding3.weight, 2)
+        i_comp, _ = self.ItemGraph(self.comp_deg, self.adjacency_comp, self.embedding3.weight, 2)
+        i_sub, _ = self.ItemGraph(self.sub_deg, self.adjacency_sub, self.embedding3.weight, 2)
         hyperedge_act = self.build_hyperedge_activation(session_item, reversed_sess_event)
         mean_hyperedge_activation = hyperedge_act.mean()
         item_hyper_prior_norm = self.normalize_item_prior(self.R_fuzzy)
         i3 = mean_hyperedge_activation * i3_fuzzy + (1.0 - mean_hyperedge_activation) * i3_base
+        comp_ratio = torch.clamp(0.60 - 0.35 * repeat_ratio.mean(), min=0.15, max=0.70)
+        sub_ratio = torch.clamp(0.25 + 0.45 * repeat_ratio.mean(), min=0.15, max=0.75)
+        base_ratio = torch.clamp(1.0 - comp_ratio - sub_ratio, min=0.10, max=0.70)
+        ratio_norm = base_ratio + comp_ratio + sub_ratio + 1e-8
+        base_ratio = base_ratio / ratio_norm
+        comp_ratio = comp_ratio / ratio_norm
+        sub_ratio = sub_ratio / ratio_norm
+        i3 = base_ratio * i3 + comp_ratio * i_comp + sub_ratio * i_sub
         i3 = i3 * ((1.0 - self.item_prior_mix) + self.item_prior_mix * item_hyper_prior_norm.unsqueeze(1))
         i1, i2, i3 = F.normalize(i1, dim=-1), F.normalize(i2, dim=-1), F.normalize(i3, dim=-1)
 
@@ -425,13 +439,23 @@ class MDHG(Module):
             s2 = self.generate_sess_emb_npos(i2, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
             s3_base = self.generate_sess_emb_npos(i3_base, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
             s3_fuzzy = self.generate_sess_emb_npos(i3_fuzzy, event_weight, session_item, session_len,reversed_sess_item, reversed_sess_event, mask)
+            s_comp = self.generate_sess_emb_npos(i_comp, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
+            s_sub = self.generate_sess_emb_npos(i_sub, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
         else:
             s1 = self.generate_sess_emb(i1, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
             s2 = self.generate_sess_emb(i2, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
             s3_base = self.generate_sess_emb(i3_base, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
             s3_fuzzy = self.generate_sess_emb(i3_fuzzy, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
+            s_comp = self.generate_sess_emb(i_comp, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
+            s_sub = self.generate_sess_emb(i_sub, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
 
         s3 = hyperedge_act.unsqueeze(1) * s3_fuzzy + (1.0 - hyperedge_act.unsqueeze(1)) * s3_base
+        comp_w = torch.clamp(0.60 - 0.35 * repeat_ratio, min=0.15, max=0.70).unsqueeze(1)
+        sub_w = torch.clamp(0.25 + 0.45 * repeat_ratio, min=0.15, max=0.75).unsqueeze(1)
+        base_w = torch.clamp(1.0 - comp_w - sub_w, min=0.10, max=0.70)
+        w_sum = base_w + comp_w + sub_w + 1e-8
+        base_w, comp_w, sub_w = base_w / w_sum, comp_w / w_sum, sub_w / w_sum
+        s3 = base_w * s3 + comp_w * s_comp + sub_w * s_sub
 
         prior_gate = self.build_fuzzy_relation_prior(session_item, reversed_sess_event)
         learned_gate = self.get_dynamic_fuzzy_gate((s1 + s2 + s3) / 3.0)
