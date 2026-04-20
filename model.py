@@ -72,6 +72,7 @@ class ItemConv(Module):
 
 
 class HyperGraphConv(Module):
+    """Lightweight hypergraph convolution on item nodes using a precomputed sparse propagation matrix."""
     def __init__(self, layers, dropout, emb_size=100):
         super(HyperGraphConv, self).__init__()
         self.layers = layers
@@ -80,6 +81,7 @@ class HyperGraphConv(Module):
         self.linears = nn.ModuleList([nn.Linear(self.emb_size, self.emb_size, bias=False) for _ in range(self.layers)])
 
     def forward(self, hyper_propagation, embedding):
+        """Args: hyper_propagation [N,N] sparse tensor, embedding [N,D]; Returns: refined embedding [N,D]."""
         x = embedding
         outs = [F.normalize(x, dim=-1, p=2)]
         for l in range(self.layers):
@@ -475,9 +477,8 @@ class MDHG(Module):
         i_sub_pair, _ = self.ItemGraph(self.sub_deg, self.adjacency_sub, self.embedding3.weight, 2)
         i_comp_hyper = self.CompHyperGraph(self.hyper_comp, self.embedding3.weight)
         i_sub_hyper = self.SubHyperGraph(self.hyper_sub, self.embedding3.weight)
-        pair_hyper_blend_ratio = self.comp_sub_pair_hyper_mix
-        i_comp = (1.0 - pair_hyper_blend_ratio) * i_comp_pair + pair_hyper_blend_ratio * i_comp_hyper
-        i_sub = (1.0 - pair_hyper_blend_ratio) * i_sub_pair + pair_hyper_blend_ratio * i_sub_hyper
+        i_comp = (1.0 - self.comp_sub_pair_hyper_mix) * i_comp_pair + self.comp_sub_pair_hyper_mix * i_comp_hyper
+        i_sub = (1.0 - self.comp_sub_pair_hyper_mix) * i_sub_pair + self.comp_sub_pair_hyper_mix * i_sub_hyper
         hyperedge_act = self.build_hyperedge_activation(session_item, reversed_sess_event)
         mean_hyperedge_activation = hyperedge_act.mean()
         item_hyper_prior_norm = self.normalize_item_prior(self.R_fuzzy)

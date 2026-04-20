@@ -267,6 +267,19 @@ def _dict_to_coo_with_self_loop(adj, n_node, self_loop=1.0):
 
 
 def _build_anchor_item_hyperedges(rel_adj, n_node, topk=8, min_neighbors=1):
+    """
+    Build item-level hyperedges from anchor-centric relation dict.
+
+    Args:
+        rel_adj: dict[int, dict[int, float]], anchor item -> neighbor score map.
+        n_node: number of items.
+        topk: number of strongest neighbors retained for each anchor.
+        min_neighbors: minimum number of retained neighbors to create one hyperedge.
+
+    Returns:
+        scipy.sparse.coo_matrix H with shape [n_hyperedges, n_node].
+        Each hyperedge contains one anchor item and its top-k related items.
+    """
     row, col, data = [], [], []
     edge_idx = 0
     for anchor in range(n_node):
@@ -294,6 +307,20 @@ def _build_anchor_item_hyperedges(rel_adj, n_node, topk=8, min_neighbors=1):
 
 
 def _incidence_to_hypergraph_propagation(H, n_node):
+    """
+    Convert incidence matrix H into node propagation matrix G.
+
+    Formula:
+        G = Dv^{-1} * H^T * De^{-1} * H
+    where De and Dv are hyperedge/node degree diagonal matrices.
+
+    Args:
+        H: incidence matrix with shape [n_hyperedges, n_node].
+        n_node: number of items.
+
+    Returns:
+        scipy.sparse.coo_matrix G with shape [n_node, n_node].
+    """
     if H.shape[0] == 0 or H.nnz == 0:
         idx = np.arange(n_node)
         return coo_matrix((np.ones(n_node), (idx, idx)), shape=(n_node, n_node))
