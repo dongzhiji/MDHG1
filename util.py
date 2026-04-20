@@ -2,6 +2,8 @@ import numpy as np
 from scipy.sparse import coo_matrix
 import warnings
 
+EPSILON = 1e-8
+
 
 def fuzzy_membership(x, center=1.0, scale=1.0):
     return float(np.exp(-abs(x - center) / max(scale, 1e-8)))
@@ -286,9 +288,10 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3):
     dist_weights = [1.0 / d for d in range(1, max_gap + 1)]
 
     def context_pair_weight(count_a, count_b):
-        return (count_a * count_b) / (count_a + count_b + 1e-8)
+        return (count_a * count_b) / (count_a + count_b + EPSILON)
 
     for sess in all_sessions:
+        # convert 1-indexed item ids to 0-indexed graph ids; skip padding/out-of-range ids
         seq = [x - 1 for x in sess if x != 0 and 1 <= x <= n_node]
         if len(seq) <= 1:
             continue

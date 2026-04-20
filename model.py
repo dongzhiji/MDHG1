@@ -268,7 +268,7 @@ class MDHG(Module):
             min=self.base_weight_min,
             max=self.base_weight_max
         )
-        w_sum = torch.clamp(base_w + comp_w + sub_w, min=1e-8)
+        w_sum = torch.clamp(base_w + comp_w + sub_w, min=self.numerical_eps)
         return base_w / w_sum, comp_w / w_sum, sub_w / w_sum
 
     def fuzzy_cross_view(self, h1, h2, h3):
