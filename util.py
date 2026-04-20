@@ -266,6 +266,62 @@ def _dict_to_coo_with_self_loop(adj, n_node, self_loop=1.0):
     return coo_matrix((data, (row, col)), shape=(n_node, n_node))
 
 
+def _build_anchor_item_hyperedges(rel_adj, n_node, topk=8, min_neighbors=1):
+    row, col, data = [], [], []
+    edge_idx = 0
+    for anchor in range(n_node):
+        neighbors = rel_adj.get(anchor, {})
+        if len(neighbors) == 0:
+            continue
+
+        sorted_neighbors = sorted(neighbors.items(), key=lambda x: x[1], reverse=True)
+        sorted_neighbors = [x for x in sorted_neighbors if x[0] != anchor and x[1] > 0][:topk]
+        if len(sorted_neighbors) < min_neighbors:
+            continue
+
+        max_w = max([w for _, w in sorted_neighbors]) if len(sorted_neighbors) > 0 else 1.0
+        row.append(edge_idx)
+        col.append(anchor)
+        data.append(1.0)
+
+        for nb, w in sorted_neighbors:
+            row.append(edge_idx)
+            col.append(nb)
+            data.append(float(np.clip(w / (max_w + EPSILON), 1e-4, 1.0)))
+        edge_idx += 1
+
+    return coo_matrix((data, (row, col)), shape=(edge_idx, n_node))
+
+
+def _incidence_to_hypergraph_propagation(H, n_node):
+    if H.shape[0] == 0 or H.nnz == 0:
+        idx = np.arange(n_node)
+        return coo_matrix((np.ones(n_node), (idx, idx)), shape=(n_node, n_node))
+
+    H = H.tocoo()
+    m = H.shape[0]
+
+    edge_deg = np.asarray(H.sum(axis=1)).reshape(-1) + EPSILON
+    node_deg = np.asarray(H.sum(axis=0)).reshape(-1) + EPSILON
+
+    edge_idx = np.arange(m)
+    node_idx = np.arange(n_node)
+    D_e_inv = coo_matrix((1.0 / edge_deg, (edge_idx, edge_idx)), shape=(m, m))
+    D_v_inv = coo_matrix((1.0 / node_deg, (node_idx, node_idx)), shape=(n_node, n_node))
+
+    # G = Dv^{-1} * H^T * De^{-1} * H
+    G = D_v_inv.dot(H.T.dot(D_e_inv.dot(H))).tocoo()
+
+    # residual self-loop for isolated/rare nodes
+    I = coo_matrix((np.ones(n_node), (node_idx, node_idx)), shape=(n_node, n_node))
+    G = (0.9 * G + 0.1 * I).tocoo()
+
+    row_sum = np.asarray(G.sum(axis=1)).reshape(-1) + EPSILON
+    D_row = coo_matrix((1.0 / row_sum, (node_idx, node_idx)), shape=(n_node, n_node))
+    G = D_row.dot(G).tocoo()
+    return G
+
+
 def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3):
     """
     Build item-view hypergraph relations learned from sessions.
@@ -276,10 +332,9 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3):
         max_gap: maximum distance window for complementary relation extraction.
 
     Returns:
-        A tuple (comp_adj, sub_adj) where each entry is a scipy COO sparse matrix
-        with shape [n_node, n_node]:
-          - comp_adj: complementary item relation graph.
-          - sub_adj: substitute item relation graph.
+        A tuple (comp_adj, sub_adj, comp_hyper, sub_hyper):
+          - comp_adj/sub_adj: pairwise relation graphs.
+          - comp_hyper/sub_hyper: item-level hypergraph propagation matrices.
     """
     comp_adj = dict()
     sub_adj = dict()
@@ -358,7 +413,11 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3):
 
     comp = _dict_to_coo_with_self_loop(comp_adj, n_node, self_loop=1.0)
     sub = _dict_to_coo_with_self_loop(sub_adj, n_node, self_loop=1.0)
-    return comp, sub
+    comp_H = _build_anchor_item_hyperedges(comp_adj, n_node, topk=8, min_neighbors=1)
+    sub_H = _build_anchor_item_hyperedges(sub_adj, n_node, topk=8, min_neighbors=1)
+    comp_hyper = _incidence_to_hypergraph_propagation(comp_H, n_node)
+    sub_hyper = _incidence_to_hypergraph_propagation(sub_H, n_node)
+    return comp, sub, comp_hyper, sub_hyper
 
 
 class Data():
@@ -394,13 +453,15 @@ class Data():
             adj_fuzzy = data_masks_fuzzy(all_train_items, n_node, all_events=all_train_events)
             R_fuzzy = data_R_fuzzy(all_train_items, n_node, all_events=all_train_events)
             R1_fuzzy = data_R1_fuzzy(all_train_items, n_node, all_events=all_train_events)
-            comp_adj, sub_adj = data_item_hypergraph_comp_sub(all_train_items, n_node)
+            comp_adj, sub_adj, comp_hyper, sub_hyper = data_item_hypergraph_comp_sub(all_train_items, n_node)
 
             self.adjacency = adj.multiply(1.0 / (adj.sum(axis=0).reshape(1, -1) + 1e-8))
             self.adjacency_T = self.adjacency.T
             self.adjacency1 = R1.multiply(1.0 / (R1.sum(axis=0).reshape(1, -1) + 1e-8))
             self.adjacency_comp = comp_adj.multiply(1.0 / (comp_adj.sum(axis=0).reshape(1, -1) + 1e-8))
             self.adjacency_sub = sub_adj.multiply(1.0 / (sub_adj.sum(axis=0).reshape(1, -1) + 1e-8))
+            self.hyper_comp = comp_hyper
+            self.hyper_sub = sub_hyper
 
             self.adjacency_fuzzy = adj_fuzzy.multiply(1.0 / (adj_fuzzy.sum(axis=0).reshape(1, -1) + 1e-8))
             self.adjacency_T_fuzzy = self.adjacency_fuzzy.T

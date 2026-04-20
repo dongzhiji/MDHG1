@@ -119,6 +119,8 @@ def main():
         adjacency1=train_data.adjacency1,
         adjacency_comp=train_data.adjacency_comp,
         adjacency_sub=train_data.adjacency_sub,
+        hyper_comp=train_data.hyper_comp,
+        hyper_sub=train_data.hyper_sub,
         R1=train_data.R1,
         comp_deg=train_data.comp_deg,
         sub_deg=train_data.sub_deg,

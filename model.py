@@ -71,8 +71,28 @@ class ItemConv(Module):
         return item_embeddings, hs
 
 
+class HyperGraphConv(Module):
+    def __init__(self, layers, dropout, emb_size=100):
+        super(HyperGraphConv, self).__init__()
+        self.layers = layers
+        self.emb_size = emb_size
+        self.dropout = nn.Dropout(p=dropout)
+        self.linears = nn.ModuleList([nn.Linear(self.emb_size, self.emb_size, bias=False) for _ in range(self.layers)])
+
+    def forward(self, hyper_propagation, embedding):
+        x = embedding
+        outs = [F.normalize(x, dim=-1, p=2)]
+        for l in range(self.layers):
+            x = self.linears[l](x)
+            x = torch.sparse.mm(hyper_propagation, x)
+            x = F.relu(x)
+            x = self.dropout(x)
+            outs.append(F.normalize(x, dim=-1, p=2))
+        return torch.sum(torch.stack(outs), 0) / max(len(outs), 1)
+
+
 class MDHG(Module):
-    def __init__(self, R, adj1, adj2, adjacency, adjacency_T, adjacency1, adjacency_comp, adjacency_sub, R1, comp_deg, sub_deg,
+    def __init__(self, R, adj1, adj2, adjacency, adjacency_T, adjacency1, adjacency_comp, adjacency_sub, hyper_comp, hyper_sub, R1, comp_deg, sub_deg,
                  adjacency_fuzzy, adjacency_T_fuzzy, adjacency1_fuzzy,
                  adj1_fuzzy, adj2_fuzzy, R_fuzzy, R1_fuzzy,
                  n_node, lr, layers, l2, beta, lam, eps, dataset,
@@ -94,6 +114,8 @@ class MDHG(Module):
         self.adjacency1 = trans_to_cuda(self.trans_adj(adjacency1))
         self.adjacency_comp = trans_to_cuda(self.trans_adj(adjacency_comp))
         self.adjacency_sub = trans_to_cuda(self.trans_adj(adjacency_sub))
+        self.hyper_comp = trans_to_cuda(self.trans_adj(hyper_comp))
+        self.hyper_sub = trans_to_cuda(self.trans_adj(hyper_sub))
         self.adjacency_fuzzy = trans_to_cuda(self.trans_adj(adjacency_fuzzy))
         self.adjacency_T_fuzzy = trans_to_cuda(self.trans_adj(adjacency_T_fuzzy))
         self.adjacency1_fuzzy = trans_to_cuda(self.trans_adj(adjacency1_fuzzy))
@@ -126,6 +148,8 @@ class MDHG(Module):
         self.pos_embedding = nn.Embedding(self.pos_len, self.emb_size)
 
         self.ItemGraph = ItemConv(layers, K1, K2, K3, dropout, alpha, emb_size=self.emb_size)
+        self.CompHyperGraph = HyperGraphConv(layers, dropout, emb_size=self.emb_size)
+        self.SubHyperGraph = HyperGraphConv(layers, dropout, emb_size=self.emb_size)
 
         self.w_1 = nn.Parameter(torch.Tensor(2 * self.emb_size, self.emb_size))
         self.w_2 = nn.Parameter(torch.Tensor(self.emb_size, 1))
@@ -446,8 +470,12 @@ class MDHG(Module):
         i2, _ = self.ItemGraph(self.adj2_fuzzy, self.adjacency_T_fuzzy, self.embedding2.weight, 1)
         i3_base, _ = self.ItemGraph(self.R1, self.adjacency1, self.embedding3.weight, 2)
         i3_fuzzy, _ = self.ItemGraph(self.R1_fuzzy, self.adjacency1_fuzzy, self.embedding3.weight, 2)
-        i_comp, _ = self.ItemGraph(self.comp_deg, self.adjacency_comp, self.embedding3.weight, 2)
-        i_sub, _ = self.ItemGraph(self.sub_deg, self.adjacency_sub, self.embedding3.weight, 2)
+        i_comp_pair, _ = self.ItemGraph(self.comp_deg, self.adjacency_comp, self.embedding3.weight, 2)
+        i_sub_pair, _ = self.ItemGraph(self.sub_deg, self.adjacency_sub, self.embedding3.weight, 2)
+        i_comp_hyper = self.CompHyperGraph(self.hyper_comp, self.embedding3.weight)
+        i_sub_hyper = self.SubHyperGraph(self.hyper_sub, self.embedding3.weight)
+        i_comp = 0.5 * (i_comp_pair + i_comp_hyper)
+        i_sub = 0.5 * (i_sub_pair + i_sub_hyper)
         hyperedge_act = self.build_hyperedge_activation(session_item, reversed_sess_event)
         mean_hyperedge_activation = hyperedge_act.mean()
         item_hyper_prior_norm = self.normalize_item_prior(self.R_fuzzy)
