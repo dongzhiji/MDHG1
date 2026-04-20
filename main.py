@@ -66,7 +66,6 @@ else:
     logging.info("CUDA is not available. Running on CPU.")
     opt.gpu_id = -1
 
-
 def reset_parameters(model):
     for layer in model.modules():
         if isinstance(layer, nn.Linear) or isinstance(layer, nn.Conv2d):
@@ -76,7 +75,6 @@ def reset_parameters(model):
         elif isinstance(layer, nn.Embedding):
             nn.init.xavier_uniform_(layer.weight)
 
-
 def init_seed(seed=None):
     if seed is None:
         seed = int(time.time() * 1000 // 1000)
@@ -85,7 +83,6 @@ def init_seed(seed=None):
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     logging.info(f"Random seed set to: {seed}")
-
 
 def main():
     logging.info("=" * 60)
@@ -97,13 +94,16 @@ def main():
 
     if opt.dataset == 'Tmall':
         n_node = 40727
-    elif opt.dataset == 'retailrocket':
+    elif opt.dataset == 'retailrocket':#最大的 item ID = 36968
         n_node = 36968
     elif opt.dataset == 'amazon':
         n_node = 18888
+    elif opt.dataset == 'lastfm':#最大的 item ID = 38997
+        n_node = 38997
+    elif opt.dataset == 'diginetica':#最大的 item ID = 43097
+        n_node =43097
     else:
         n_node = 309
-
     logging.info(f"数据集: {opt.dataset}, 节点数: {n_node}")
 
     train_data = Data(train_data, all_train, shuffle=False, n_node=n_node)
@@ -117,7 +117,11 @@ def main():
         adjacency=train_data.adjacency,
         adjacency_T=train_data.adjacency_T,
         adjacency1=train_data.adjacency1,
+        adjacency_comp=train_data.adjacency_comp,
+        adjacency_sub=train_data.adjacency_sub,
         R1=train_data.R1,
+        comp_deg=train_data.comp_deg,
+        sub_deg=train_data.sub_deg,
         adjacency_fuzzy=train_data.adjacency_fuzzy,
         adjacency_T_fuzzy=train_data.adjacency_T_fuzzy,
         adjacency1_fuzzy=train_data.adjacency1_fuzzy,

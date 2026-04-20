@@ -72,7 +72,7 @@ class ItemConv(Module):
 
 
 class MDHG(Module):
-    def __init__(self, R, adj1, adj2, adjacency, adjacency_T, adjacency1, R1,
+    def __init__(self, R, adj1, adj2, adjacency, adjacency_T, adjacency1, adjacency_comp, adjacency_sub, R1, comp_deg, sub_deg,
                  adjacency_fuzzy, adjacency_T_fuzzy, adjacency1_fuzzy,
                  adj1_fuzzy, adj2_fuzzy, R_fuzzy, R1_fuzzy,
                  n_node, lr, layers, l2, beta, lam, eps, dataset,
@@ -92,6 +92,8 @@ class MDHG(Module):
         self.adjacency = trans_to_cuda(self.trans_adj(adjacency))
         self.adjacency_T = trans_to_cuda(self.trans_adj(adjacency_T))
         self.adjacency1 = trans_to_cuda(self.trans_adj(adjacency1))
+        self.adjacency_comp = trans_to_cuda(self.trans_adj(adjacency_comp))
+        self.adjacency_sub = trans_to_cuda(self.trans_adj(adjacency_sub))
         self.adjacency_fuzzy = trans_to_cuda(self.trans_adj(adjacency_fuzzy))
         self.adjacency_T_fuzzy = trans_to_cuda(self.trans_adj(adjacency_T_fuzzy))
         self.adjacency1_fuzzy = trans_to_cuda(self.trans_adj(adjacency1_fuzzy))
@@ -102,6 +104,8 @@ class MDHG(Module):
         self.adj1_fuzzy = torch.cuda.FloatTensor(adj1_fuzzy) if torch.cuda.is_available() else torch.FloatTensor(adj1_fuzzy)
         self.adj2_fuzzy = torch.cuda.FloatTensor(adj2_fuzzy) if torch.cuda.is_available() else torch.FloatTensor(adj2_fuzzy)
         self.R_fuzzy = torch.cuda.FloatTensor(R_fuzzy) if torch.cuda.is_available() else torch.FloatTensor(R_fuzzy)
+        self.comp_deg = torch.cuda.FloatTensor(comp_deg) if torch.cuda.is_available() else torch.FloatTensor(comp_deg)
+        self.sub_deg = torch.cuda.FloatTensor(sub_deg) if torch.cuda.is_available() else torch.FloatTensor(sub_deg)
         self.R_fuzzy = self.R_fuzzy.reshape(-1)
         if self.R_fuzzy.numel() < self.n_node:
             pad = torch.ones(self.n_node - self.R_fuzzy.numel(), device=self.R_fuzzy.device)
@@ -174,6 +178,18 @@ class MDHG(Module):
         self.short_len_factor_min = short_len_factor_min
         self.topk_hardneg = 100
         self.score_temperature = 0.85
+
+        # item-view complementary/substitute fusion weights
+        self.comp_weight_base = 0.60
+        self.comp_weight_decay = 0.35
+        self.sub_weight_base = 0.25
+        self.sub_weight_gain = 0.45
+        self.comp_weight_min = 0.15
+        self.comp_weight_max = 0.70
+        self.sub_weight_min = 0.15
+        self.sub_weight_max = 0.75
+        self.base_weight_min = 0.10
+        self.base_weight_max = 0.70
         self.init_parameters()
 
     def init_parameters(self):
@@ -209,20 +225,21 @@ class MDHG(Module):
     def build_fuzzy_relation_prior(self, session_item, reversed_sess_event):
         repeat_ratio = self.calc_repeat_ratio_batch(session_item)
         evt_strength = self.event_scale(reversed_sess_event).squeeze(-1).mean(dim=1)
-
-        c1 = torch.clamp(0.65 + 0.15 * evt_strength - 0.20 * repeat_ratio, min=0.05)  # 顺序
-        c2 = torch.clamp(0.55 + 0.10 * (1.0 - repeat_ratio), min=0.05)               # 转移
-        c3 = torch.clamp(0.35 + 0.30 * repeat_ratio + 0.05 * evt_strength, min=0.05) # 共现
-
+        if self.dataset == 'Tmall':
+            c1 = torch.clamp(0.70 + 0.20 * evt_strength - 0.15 * repeat_ratio, min=0.10)  # 顺序
+            c2 = torch.clamp(0.60 + 0.15 * (1.0 - repeat_ratio), min=0.10)  # 转移
+            c3 = torch.clamp(0.30 + 0.35 * repeat_ratio + 0.10 * evt_strength, min=0.10)  # 共现
+        else:
+            c1 = torch.clamp(0.65 + 0.15 * evt_strength - 0.20 * repeat_ratio, min=0.05)
+            c2 = torch.clamp(0.55 + 0.10 * (1.0 - repeat_ratio), min=0.05)
+            c3 = torch.clamp(0.35 + 0.30 * repeat_ratio + 0.05 * evt_strength, min=0.05)
         prior = torch.stack([c1, c2, c3], dim=1)
         prior = prior / (prior.sum(dim=1, keepdim=True) + 1e-8)
         return prior
-
     def get_dynamic_fuzzy_gate(self, sess_emb):
         gate_logits = self.gate_mlp(sess_emb)
         gate_logits = self.gate_dropout(gate_logits)
         return torch.softmax(gate_logits, dim=-1)
-
     # 机制2：动态超边激活概率
     def build_hyperedge_activation(self, session_item, reversed_sess_event):
         """Compute session-level hyperedge activation probabilities from repeat ratio and event intensity."""
@@ -230,11 +247,29 @@ class MDHG(Module):
         evt_strength = self.event_scale(reversed_sess_event).squeeze(-1).mean(dim=1)
         act = self.hyperedge_min_prob + self.hyperedge_event_gain * evt_strength - self.hyperedge_repeat_penalty * repeat_ratio
         return torch.clamp(act, min=0.10, max=0.95)
-
     def normalize_item_prior(self, prior):
         """Normalize item prior tensor by mean value with numerical-stability epsilon."""
         scale = torch.clamp(prior.abs().mean(), min=self.numerical_eps)
         return prior / scale
+
+    def compute_comp_sub_weights(self, repeat_ratio):
+        comp_w = torch.clamp(
+            self.comp_weight_base - self.comp_weight_decay * repeat_ratio,
+            min=self.comp_weight_min,
+            max=self.comp_weight_max
+        )
+        sub_w = torch.clamp(
+            self.sub_weight_base + self.sub_weight_gain * repeat_ratio,
+            min=self.sub_weight_min,
+            max=self.sub_weight_max
+        )
+        base_w = torch.clamp(
+            1.0 - comp_w - sub_w,
+            min=self.base_weight_min,
+            max=self.base_weight_max
+        )
+        w_sum = torch.clamp(base_w + comp_w + sub_w, min=self.numerical_eps)
+        return base_w / w_sum, comp_w / w_sum, sub_w / w_sum
 
     def fuzzy_cross_view(self, h1, h2, h3):
         channel_embeddings = [h1, h2, h3]
@@ -411,10 +446,15 @@ class MDHG(Module):
         i2, _ = self.ItemGraph(self.adj2_fuzzy, self.adjacency_T_fuzzy, self.embedding2.weight, 1)
         i3_base, _ = self.ItemGraph(self.R1, self.adjacency1, self.embedding3.weight, 2)
         i3_fuzzy, _ = self.ItemGraph(self.R1_fuzzy, self.adjacency1_fuzzy, self.embedding3.weight, 2)
+        i_comp, _ = self.ItemGraph(self.comp_deg, self.adjacency_comp, self.embedding3.weight, 2)
+        i_sub, _ = self.ItemGraph(self.sub_deg, self.adjacency_sub, self.embedding3.weight, 2)
         hyperedge_act = self.build_hyperedge_activation(session_item, reversed_sess_event)
         mean_hyperedge_activation = hyperedge_act.mean()
         item_hyper_prior_norm = self.normalize_item_prior(self.R_fuzzy)
         i3 = mean_hyperedge_activation * i3_fuzzy + (1.0 - mean_hyperedge_activation) * i3_base
+        # item-level uses batch mean repeat ratio for stable global relation fusion
+        base_weight, comp_weight, sub_weight = self.compute_comp_sub_weights(repeat_ratio.mean())
+        i3 = base_weight * i3 + comp_weight * i_comp + sub_weight * i_sub
         i3 = i3 * ((1.0 - self.item_prior_mix) + self.item_prior_mix * item_hyper_prior_norm.unsqueeze(1))
         i1, i2, i3 = F.normalize(i1, dim=-1), F.normalize(i2, dim=-1), F.normalize(i3, dim=-1)
 
@@ -425,13 +465,21 @@ class MDHG(Module):
             s2 = self.generate_sess_emb_npos(i2, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
             s3_base = self.generate_sess_emb_npos(i3_base, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
             s3_fuzzy = self.generate_sess_emb_npos(i3_fuzzy, event_weight, session_item, session_len,reversed_sess_item, reversed_sess_event, mask)
+            s_comp = self.generate_sess_emb_npos(i_comp, event_weight, session_item, session_len, reversed_sess_item,                                                 reversed_sess_event, mask)
+            s_sub = self.generate_sess_emb_npos(i_sub, event_weight, session_item, session_len, reversed_sess_item,                                                reversed_sess_event, mask)
         else:
             s1 = self.generate_sess_emb(i1, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
             s2 = self.generate_sess_emb(i2, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
             s3_base = self.generate_sess_emb(i3_base, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
             s3_fuzzy = self.generate_sess_emb(i3_fuzzy, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
+            s_comp = self.generate_sess_emb(i_comp, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
+            s_sub = self.generate_sess_emb(i_sub, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
 
         s3 = hyperedge_act.unsqueeze(1) * s3_fuzzy + (1.0 - hyperedge_act.unsqueeze(1)) * s3_base
+        # session-level uses per-session repeat ratio for personalized relation fusion
+        base_w, comp_w, sub_w = self.compute_comp_sub_weights(repeat_ratio)
+        base_w, comp_w, sub_w = base_w.unsqueeze(1), comp_w.unsqueeze(1), sub_w.unsqueeze(1)
+        s3 = base_w * s3 + comp_w * s_comp + sub_w * s_sub
 
         prior_gate = self.build_fuzzy_relation_prior(session_item, reversed_sess_event)
         learned_gate = self.get_dynamic_fuzzy_gate((s1 + s2 + s3) / 3.0)
