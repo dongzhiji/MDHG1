@@ -8,10 +8,8 @@ import torch.nn.functional as F
 from numba import jit
 from tqdm import tqdm
 
-
 def trans_to_cuda(variable):
     return variable.cuda() if torch.cuda.is_available() else variable
-
 
 def trans_to_cpu(variable):
     return variable.cpu() if torch.cuda.is_available() else variable
@@ -47,7 +45,6 @@ class ItemConv(Module):
         item_embeddings = embedding
         final = [item_embeddings]
         finalh = []
-
         for i in range(self.layers):
             item_embeddings = self.w_item[f'weight_item{i}'](item_embeddings)
             item_embeddings = torch.sparse.mm(adjacency, item_embeddings)
@@ -62,7 +59,6 @@ class ItemConv(Module):
             h = h @ item_embeddings
             h = H1 @ h
             item_embeddings = h + item_embeddings
-
             final.append(F.normalize(item_embeddings, dim=-1, p=2))
             finalh.append(F.normalize(h, dim=-1, p=2))
 
@@ -70,15 +66,36 @@ class ItemConv(Module):
         hs = torch.sum(torch.stack(finalh), 0) / max(self.layers, 1)
         return item_embeddings, hs
 
+class HyperGraphConv(Module):
+    """Lightweight hypergraph convolution on item nodes using a precomputed sparse propagation matrix."""
+    def __init__(self, layers, dropout, emb_size=100):
+        super(HyperGraphConv, self).__init__()
+        self.layers = layers
+        self.emb_size = emb_size
+        self.dropout = nn.Dropout(p=dropout)
+        self.linears = nn.ModuleList([nn.Linear(self.emb_size, self.emb_size, bias=False) for _ in range(self.layers)])
+
+    def forward(self, hyper_propagation, embedding):
+        """Args: hyper_propagation [N,N] sparse tensor, embedding [N,D]; Returns: refined embedding [N,D]."""
+        x = embedding
+        outs = [F.normalize(x, dim=-1, p=2)]
+        for l in range(self.layers):
+            x = self.linears[l](x)
+            x = torch.sparse.mm(hyper_propagation, x)
+            x = F.relu(x)
+            x = self.dropout(x)
+            outs.append(F.normalize(x, dim=-1, p=2))
+        return torch.sum(torch.stack(outs), 0) / len(outs)
+
 
 class MDHG(Module):
-    def __init__(self, R, adj1, adj2, adjacency, adjacency_T, adjacency1, adjacency_comp, adjacency_sub, R1, comp_deg, sub_deg,
+    def __init__(self, R, adj1, adj2, adjacency, adjacency_T, adjacency1, adjacency_comp, adjacency_sub, hyper_comp, hyper_sub, R1, comp_deg, sub_deg,
                  adjacency_fuzzy, adjacency_T_fuzzy, adjacency1_fuzzy,
                  adj1_fuzzy, adj2_fuzzy, R_fuzzy, R1_fuzzy,
                  n_node, lr, layers, l2, beta, lam, eps, dataset,
                  K1, K2, K3, dropout, alpha, emb_size=100, batch_size=100,
                  intent_align_weight=0.03, short_intent_min=0.10, short_intent_max=0.45,
-                 short_len_factor_min=0.35):
+                 short_len_factor_min=0.35, comp_sub_pair_hyper_mix=0.5):
         super(MDHG, self).__init__()
         self.emb_size = emb_size
         self.batch_size = batch_size
@@ -88,16 +105,16 @@ class MDHG(Module):
         self.layers = layers
         self.w_k = 10
         self.numerical_eps = 1e-8
-
         self.adjacency = trans_to_cuda(self.trans_adj(adjacency))
         self.adjacency_T = trans_to_cuda(self.trans_adj(adjacency_T))
         self.adjacency1 = trans_to_cuda(self.trans_adj(adjacency1))
         self.adjacency_comp = trans_to_cuda(self.trans_adj(adjacency_comp))
         self.adjacency_sub = trans_to_cuda(self.trans_adj(adjacency_sub))
+        self.hyper_comp = trans_to_cuda(self.trans_adj(hyper_comp))
+        self.hyper_sub = trans_to_cuda(self.trans_adj(hyper_sub))
         self.adjacency_fuzzy = trans_to_cuda(self.trans_adj(adjacency_fuzzy))
         self.adjacency_T_fuzzy = trans_to_cuda(self.trans_adj(adjacency_T_fuzzy))
         self.adjacency1_fuzzy = trans_to_cuda(self.trans_adj(adjacency1_fuzzy))
-
         self.adj1 = torch.cuda.FloatTensor(adj1) if torch.cuda.is_available() else torch.FloatTensor(adj1)
         self.adj2 = torch.cuda.FloatTensor(adj2) if torch.cuda.is_available() else torch.FloatTensor(adj2)
         self.R1 = torch.cuda.FloatTensor(R1) if torch.cuda.is_available() else torch.FloatTensor(R1)
@@ -113,20 +130,17 @@ class MDHG(Module):
         elif self.R_fuzzy.numel() > self.n_node:
             self.R_fuzzy = self.R_fuzzy[:self.n_node]
         self.R1_fuzzy = torch.cuda.FloatTensor(R1_fuzzy) if torch.cuda.is_available() else torch.FloatTensor(R1_fuzzy)
-
         self.embedding1 = nn.Embedding(self.n_node, self.emb_size)
         self.embedding2 = nn.Embedding(self.n_node, self.emb_size)
         self.embedding3 = nn.Embedding(self.n_node, self.emb_size)
-
         self.event_embedding = nn.Embedding(4, self.emb_size)
         self.event_scale = nn.Embedding(4, 1)
-
         self.pos_decay = 0.2
         self.pos_len = 1000 if self.dataset == 'retailrocket' else 200
         self.pos_embedding = nn.Embedding(self.pos_len, self.emb_size)
-
         self.ItemGraph = ItemConv(layers, K1, K2, K3, dropout, alpha, emb_size=self.emb_size)
-
+        self.CompHyperGraph = HyperGraphConv(layers, dropout, emb_size=self.emb_size)
+        self.SubHyperGraph = HyperGraphConv(layers, dropout, emb_size=self.emb_size)
         self.w_1 = nn.Parameter(torch.Tensor(2 * self.emb_size, self.emb_size))
         self.w_2 = nn.Parameter(torch.Tensor(self.emb_size, 1))
         self.glu1 = nn.Linear(self.emb_size, self.emb_size, bias=True)
@@ -150,7 +164,6 @@ class MDHG(Module):
 
         self.loss_function = nn.CrossEntropyLoss()
         self.optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
-
         # ---- 稳定版损失配置（先保主任务）----
         self.fuzzy_prior_strength = 0.35
         self.rank_margin = 0.30
@@ -159,7 +172,6 @@ class MDHG(Module):
         self.rank_loss_weight = 0.18
         self.hyper_loss_weight = 0.01
         self.soft_loss_weight = 0.02
-
         self.warmup_epochs = 0
         self.max_fuzzy_factor = 0.25
         self.hyperedge_min_prob = 0.35
@@ -169,7 +181,6 @@ class MDHG(Module):
         self.soft_label_smooth_min = 0.02
         self.soft_label_smooth_gain = 0.08
         self.soft_label_smooth_max = 0.06
-
         self.label_smoothing = 0.06
         self.bpr_loss_weight = 0.18
         self.intent_align_weight = intent_align_weight
@@ -190,6 +201,7 @@ class MDHG(Module):
         self.sub_weight_max = 0.75
         self.base_weight_min = 0.10
         self.base_weight_max = 0.70
+        self.comp_sub_pair_hyper_mix = comp_sub_pair_hyper_mix
         self.init_parameters()
 
     def init_parameters(self):
@@ -205,7 +217,6 @@ class MDHG(Module):
             self.event_scale.weight.data[1] = torch.tensor([0.5], device=d)
             self.event_scale.weight.data[2] = torch.tensor([1.2], device=d)
             self.event_scale.weight.data[3] = torch.tensor([2.0], device=d)
-
     def trans_adj(self, adjacency):
         values = adjacency.data
         indices = np.vstack((adjacency.row, adjacency.col))
@@ -213,14 +224,12 @@ class MDHG(Module):
         v = torch.FloatTensor(values)
         shape = adjacency.shape
         return torch.sparse.FloatTensor(i, v, torch.Size(shape))
-
     def calc_repeat_ratio_batch(self, session_item):
         ratios = []
         for sess in session_item.detach().cpu().numpy():
             seq = [x for x in sess.tolist() if x > 0]
             ratios.append(0.0 if len(seq) == 0 else (len(seq) - len(set(seq))) / len(seq))
         return torch.tensor(ratios, device=session_item.device, dtype=torch.float32)
-
     # 机制3：关系置信先验
     def build_fuzzy_relation_prior(self, session_item, reversed_sess_event):
         repeat_ratio = self.calc_repeat_ratio_batch(session_item)
@@ -236,10 +245,12 @@ class MDHG(Module):
         prior = torch.stack([c1, c2, c3], dim=1)
         prior = prior / (prior.sum(dim=1, keepdim=True) + 1e-8)
         return prior
+
     def get_dynamic_fuzzy_gate(self, sess_emb):
         gate_logits = self.gate_mlp(sess_emb)
         gate_logits = self.gate_dropout(gate_logits)
         return torch.softmax(gate_logits, dim=-1)
+
     # 机制2：动态超边激活概率
     def build_hyperedge_activation(self, session_item, reversed_sess_event):
         """Compute session-level hyperedge activation probabilities from repeat ratio and event intensity."""
@@ -247,6 +258,7 @@ class MDHG(Module):
         evt_strength = self.event_scale(reversed_sess_event).squeeze(-1).mean(dim=1)
         act = self.hyperedge_min_prob + self.hyperedge_event_gain * evt_strength - self.hyperedge_repeat_penalty * repeat_ratio
         return torch.clamp(act, min=0.10, max=0.95)
+
     def normalize_item_prior(self, prior):
         """Normalize item prior tensor by mean value with numerical-stability epsilon."""
         scale = torch.clamp(prior.abs().mean(), min=self.numerical_eps)
@@ -270,6 +282,7 @@ class MDHG(Module):
         )
         w_sum = torch.clamp(base_w + comp_w + sub_w, min=self.numerical_eps)
         return base_w / w_sum, comp_w / w_sum, sub_w / w_sum
+
 
     def fuzzy_cross_view(self, h1, h2, h3):
         channel_embeddings = [h1, h2, h3]
@@ -314,11 +327,9 @@ class MDHG(Module):
         zeros = torch.zeros(1, self.emb_size, device=item_embedding.device)
         item_embedding = torch.cat([zeros, item_embedding], 0)
         event_embedding = torch.cat([zeros, event_embedding], 0)
-
         batch_size = session_item.shape[0]
         seq_len_all = list(reversed_sess_item.shape)[1]
         seq_h = torch.zeros(batch_size, seq_len_all, self.emb_size, device=item_embedding.device)
-
         for i in range(batch_size):
             item_part = item_embedding[reversed_sess_item[i]]
             event_part = event_embedding[reversed_sess_event[i]]
@@ -327,27 +338,22 @@ class MDHG(Module):
             pos_ids = torch.arange(seq_len, device=item_part.device).float()
             position_weight = torch.exp(-self.pos_decay * pos_ids).unsqueeze(-1)
             seq_h[i] = position_weight * (item_part + event_scales * event_part)
-
         if session_len.dim() == 1:
             session_len = session_len.unsqueeze(1)
         hs = torch.sum(seq_h, 1) / (session_len.float() + 1e-8)
-
         mask = mask.float().unsqueeze(-1)
         len_seq = seq_h.shape[1]
-
         pos_len = min(len_seq, self.pos_len)
         pos_emb = self.pos_embedding.weight[:pos_len]
         if len_seq > self.pos_len:
             seq_h = seq_h[:, -self.pos_len:, :]
             mask = mask[:, -self.pos_len:, :]
             len_seq = self.pos_len
-
         pos_emb = pos_emb.unsqueeze(0).repeat(batch_size, 1, 1)
         hs = hs.unsqueeze(1).repeat(1, len_seq, 1)
 
         m = min(seq_h.shape[1], pos_emb.shape[1], mask.shape[1], hs.shape[1])
         seq_h, pos_emb, mask, hs = seq_h[:, :m], pos_emb[:, :m], mask[:, :m], hs[:, :m]
-
         nh = torch.matmul(torch.cat([pos_emb, seq_h], -1), self.w_1)
         nh = torch.tanh(nh)
         nh = torch.sigmoid(self.glu1(nh) + self.glu2(hs))
@@ -359,32 +365,26 @@ class MDHG(Module):
         zeros = torch.zeros(1, self.emb_size, device=item_embedding.device)
         item_embedding = torch.cat([zeros, item_embedding], 0)
         event_embedding = torch.cat([zeros, event_embedding], 0)
-
         batch_size = session_item.shape[0]
         seq_len_all = list(reversed_sess_item.shape)[1]
         seq_h = torch.zeros(batch_size, seq_len_all, self.emb_size, device=item_embedding.device)
-
         for i in range(batch_size):
             item_part = item_embedding[reversed_sess_item[i]]
             event_part = event_embedding[reversed_sess_event[i]]
             event_scales = self.event_scale(reversed_sess_event[i]).to(item_embedding.device)
-
             seq_len = item_part.shape[0]
             pos_ids = torch.arange(seq_len, device=item_part.device).float()
             position_weight = torch.exp(-self.pos_decay * pos_ids).unsqueeze(-1)
             seq_h[i] = position_weight * (item_part + event_scales * event_part)
-
         if session_len.dim() == 1:
             session_len = session_len.unsqueeze(1)
         hs = torch.sum(seq_h, 1) / (session_len.float() + 1e-8)
-
         mask = mask.float().unsqueeze(-1)
         len_seq = seq_h.shape[1]
         hs = hs.unsqueeze(1).repeat(1, len_seq, 1)
 
         m = min(seq_h.shape[1], mask.shape[1], hs.shape[1])
         seq_h, mask, hs = seq_h[:, :m], mask[:, :m], hs[:, :m]
-
         nh = torch.sigmoid(self.glu1(seq_h) + self.glu2(hs))
         beta = torch.matmul(nh, self.w_2) * mask
         return torch.sum(beta * seq_h, 1)
@@ -439,15 +439,17 @@ class MDHG(Module):
     def forward(self, session_item, session_len, reversed_sess_item, reversed_sess_event, mask, epoch, tar, train):
         repeat_ratio = self.calc_repeat_ratio_batch(session_item)
         fuzzy_strength = (0.20 + 0.45 * torch.clamp(repeat_ratio / 0.3, max=1.0)).unsqueeze(1)
-
         event_weight = self.event_embedding.weight
-
         i1, _ = self.ItemGraph(self.adj1_fuzzy, self.adjacency_fuzzy, self.embedding1.weight, 0)
         i2, _ = self.ItemGraph(self.adj2_fuzzy, self.adjacency_T_fuzzy, self.embedding2.weight, 1)
         i3_base, _ = self.ItemGraph(self.R1, self.adjacency1, self.embedding3.weight, 2)
         i3_fuzzy, _ = self.ItemGraph(self.R1_fuzzy, self.adjacency1_fuzzy, self.embedding3.weight, 2)
-        i_comp, _ = self.ItemGraph(self.comp_deg, self.adjacency_comp, self.embedding3.weight, 2)
-        i_sub, _ = self.ItemGraph(self.sub_deg, self.adjacency_sub, self.embedding3.weight, 2)
+        i_comp_pair, _ = self.ItemGraph(self.comp_deg, self.adjacency_comp, self.embedding3.weight, 2)
+        i_sub_pair, _ = self.ItemGraph(self.sub_deg, self.adjacency_sub, self.embedding3.weight, 2)
+        i_comp_hyper = self.CompHyperGraph(self.hyper_comp, self.embedding3.weight)
+        i_sub_hyper = self.SubHyperGraph(self.hyper_sub, self.embedding3.weight)
+        i_comp = (1.0 - self.comp_sub_pair_hyper_mix) * i_comp_pair + self.comp_sub_pair_hyper_mix * i_comp_hyper
+        i_sub = (1.0 - self.comp_sub_pair_hyper_mix) * i_sub_pair + self.comp_sub_pair_hyper_mix * i_sub_hyper
         hyperedge_act = self.build_hyperedge_activation(session_item, reversed_sess_event)
         mean_hyperedge_activation = hyperedge_act.mean()
         item_hyper_prior_norm = self.normalize_item_prior(self.R_fuzzy)
@@ -457,7 +459,6 @@ class MDHG(Module):
         i3 = base_weight * i3 + comp_weight * i_comp + sub_weight * i_sub
         i3 = i3 * ((1.0 - self.item_prior_mix) + self.item_prior_mix * item_hyper_prior_norm.unsqueeze(1))
         i1, i2, i3 = F.normalize(i1, dim=-1), F.normalize(i2, dim=-1), F.normalize(i3, dim=-1)
-
         item_mix, _ = self.fuzzy_cross_view(i1, i2, i3)
 
         if self.dataset == 'Tmall':
@@ -465,8 +466,8 @@ class MDHG(Module):
             s2 = self.generate_sess_emb_npos(i2, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
             s3_base = self.generate_sess_emb_npos(i3_base, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
             s3_fuzzy = self.generate_sess_emb_npos(i3_fuzzy, event_weight, session_item, session_len,reversed_sess_item, reversed_sess_event, mask)
-            s_comp = self.generate_sess_emb_npos(i_comp, event_weight, session_item, session_len, reversed_sess_item,                                                 reversed_sess_event, mask)
-            s_sub = self.generate_sess_emb_npos(i_sub, event_weight, session_item, session_len, reversed_sess_item,                                                reversed_sess_event, mask)
+            s_comp = self.generate_sess_emb_npos(i_comp, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
+            s_sub = self.generate_sess_emb_npos(i_sub, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
         else:
             s1 = self.generate_sess_emb(i1, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
             s2 = self.generate_sess_emb(i2, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)

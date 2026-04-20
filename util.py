@@ -1,13 +1,10 @@
 import numpy as np
 from scipy.sparse import coo_matrix
 import warnings
-
 EPSILON = 1e-8
-
 
 def fuzzy_membership(x, center=1.0, scale=1.0):
     return float(np.exp(-abs(x - center) / max(scale, 1e-8)))
-
 
 # ===== 新增：关系专属模糊边权辅助函数 =====
 def _event_strength(e):
@@ -15,14 +12,12 @@ def _event_strength(e):
     mapping = {0: 0.0, 1: 0.5, 2: 1.0, 3: 2.0}
     return mapping.get(int(e), 0.5)
 
-
 def _safe_get_event(events, idx):
     if events is None:
         return 1
     if idx < 0 or idx >= len(events):
         return 1
     return events[idx]
-
 
 def _relation_fuzzy_weight(freq, pos_i, sess_len, e_i, e_j, relation='r1', repeat_ratio=0.0, dataset='Tmall'):
     # Tmall数据集特定参数
@@ -73,7 +68,6 @@ def _relation_fuzzy_weight(freq, pos_i, sess_len, e_i, e_j, relation='r1', repea
             mu_cons = 1.0 - min(max(repeat_ratio, 0.0), 1.0) * 0.5
         else:
             mu_cons = 0.7 + min(max(repeat_ratio, 0.0), 1.0) * 0.3
-
     return float(np.clip(mu_freq * mu_time * mu_beh * mu_cons, 1e-8, 1.0))
 
 def data_masks(all_sessions, n_node):
@@ -95,7 +89,6 @@ def data_masks(all_sessions, n_node):
                     adj[current_idx][next_idx] = 1
                 else:
                     adj[current_idx][next_idx] += 1
-
     for i in range(n_node):
         if i not in adj:
             adj[i] = dict()
@@ -108,14 +101,11 @@ def data_masks(all_sessions, n_node):
                 row.append(i)
                 col.append(j)
                 data.append(adj[i][j])
-
     if len(row) == 0:
         row = list(range(n_node))
         col = list(range(n_node))
         data = [1] * n_node
-
     return coo_matrix((data, (row, col)), shape=(n_node, n_node))
-
 
 # ===== 改造：动态超图/关系图模糊边权 =====
 def data_masks_fuzzy(all_sessions, n_node, all_events=None):
@@ -141,7 +131,6 @@ def data_masks_fuzzy(all_sessions, n_node, all_events=None):
             freq = old + 1.0
             w = _relation_fuzzy_weight(freq, i, sess_len, ei, ej, relation='r1', repeat_ratio=repeat_ratio)
             adj[current_idx][next_idx] = old + w
-
     for i in range(n_node):
         if i not in adj:
             adj[i] = dict()
@@ -243,7 +232,6 @@ def data_R1_fuzzy(all_sessions, n_node, all_events=None):
             data.append(adj[i][j])
     return coo_matrix((data, (row, col)), shape=(n_node, n_node))
 
-
 def _dict_to_coo_with_self_loop(adj, n_node, self_loop=1.0):
     for i in range(n_node):
         if i not in adj:
@@ -266,18 +254,102 @@ def _dict_to_coo_with_self_loop(adj, n_node, self_loop=1.0):
     return coo_matrix((data, (row, col)), shape=(n_node, n_node))
 
 
+def _build_anchor_item_hyperedges(rel_adj, n_node, topk=8, min_neighbors=1):
+    """
+    Build item-level hyperedges from anchor-centric relation dict.
+
+    Args:
+        rel_adj: dict[int, dict[int, float]], anchor item -> neighbor score map.
+        n_node: number of items.
+        topk: number of strongest neighbors retained for each anchor.
+        min_neighbors: minimum number of retained neighbors to create one hyperedge.
+
+    Returns:
+        scipy.sparse.coo_matrix H with shape [n_hyperedges, n_node].
+        Each hyperedge contains one anchor item and its top-k related items.
+    """
+    row, col, data = [], [], []
+    edge_idx = 0
+    for anchor in range(n_node):
+        neighbors = rel_adj.get(anchor, {})
+        if len(neighbors) == 0:
+            continue
+
+        sorted_neighbors = sorted(neighbors.items(), key=lambda x: x[1], reverse=True)
+        sorted_neighbors = [x for x in sorted_neighbors if x[0] != anchor and x[1] > 0][:topk]
+        if len(sorted_neighbors) < min_neighbors:
+            continue
+
+        max_w = max([w for _, w in sorted_neighbors]) if len(sorted_neighbors) > 0 else 1.0
+        row.append(edge_idx)
+        col.append(anchor)
+        data.append(1.0)
+
+        for nb, w in sorted_neighbors:
+            row.append(edge_idx)
+            col.append(nb)
+            data.append(float(np.clip(w / (max_w + EPSILON), 1e-4, 1.0)))
+        edge_idx += 1
+
+    return coo_matrix((data, (row, col)), shape=(edge_idx, n_node))
+
+
+def _incidence_to_hypergraph_propagation(H, n_node):
+    """
+    Convert incidence matrix H into node propagation matrix G.
+
+    Formula:
+        G = Dv^{-1} * H^T * De^{-1} * H
+    where De and Dv are hyperedge/node degree diagonal matrices.
+
+    Args:
+        H: incidence matrix with shape [n_hyperedges, n_node].
+        n_node: number of items.
+
+    Returns:
+        scipy.sparse.coo_matrix G with shape [n_node, n_node].
+    """
+    if H.shape[0] == 0 or H.nnz == 0:
+        idx = np.arange(n_node)
+        return coo_matrix((np.ones(n_node), (idx, idx)), shape=(n_node, n_node))
+
+    H = H.tocoo()
+    m = H.shape[0]
+
+    edge_deg = np.asarray(H.sum(axis=1)).reshape(-1) + EPSILON
+    node_deg = np.asarray(H.sum(axis=0)).reshape(-1) + EPSILON
+
+    edge_idx = np.arange(m)
+    node_idx = np.arange(n_node)
+    D_e_inv = coo_matrix((1.0 / edge_deg, (edge_idx, edge_idx)), shape=(m, m))
+    D_v_inv = coo_matrix((1.0 / node_deg, (node_idx, node_idx)), shape=(n_node, n_node))
+
+    # G = Dv^{-1} * H^T * De^{-1} * H
+    G = D_v_inv.dot(H.T.dot(D_e_inv.dot(H))).tocoo()
+
+    # residual self-loop for isolated/rare nodes
+    I = coo_matrix((np.ones(n_node), (node_idx, node_idx)), shape=(n_node, n_node))
+    G = (0.9 * G + 0.1 * I).tocoo()
+
+    row_sum = np.asarray(G.sum(axis=1)).reshape(-1) + EPSILON
+    D_row = coo_matrix((1.0 / row_sum, (node_idx, node_idx)), shape=(n_node, n_node))
+    G = D_row.dot(G).tocoo()
+    return G
+
+
 def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3):
     """
     Build item-view hypergraph relations learned from sessions.
+
     Args:
         all_sessions: list of session item sequences.
         n_node: total number of items.
         max_gap: maximum distance window for complementary relation extraction.
+
     Returns:
-        A tuple (comp_adj, sub_adj) where each entry is a scipy COO sparse matrix
-        with shape [n_node, n_node]:
-          - comp_adj: complementary item relation graph.
-          - sub_adj: substitute item relation graph.
+        A tuple (comp_adj, sub_adj, comp_hyper, sub_hyper):
+          - comp_adj/sub_adj: pairwise relation graphs.
+          - comp_hyper/sub_hyper: item-level hypergraph propagation matrices.
     """
     comp_adj = dict()
     sub_adj = dict()
@@ -356,16 +428,16 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3):
 
     comp = _dict_to_coo_with_self_loop(comp_adj, n_node, self_loop=1.0)
     sub = _dict_to_coo_with_self_loop(sub_adj, n_node, self_loop=1.0)
-    return comp, sub
-
-
-
+    comp_H = _build_anchor_item_hyperedges(comp_adj, n_node, topk=8, min_neighbors=1)
+    sub_H = _build_anchor_item_hyperedges(sub_adj, n_node, topk=8, min_neighbors=1)
+    comp_hyper = _incidence_to_hypergraph_propagation(comp_H, n_node)
+    sub_hyper = _incidence_to_hypergraph_propagation(sub_H, n_node)
+    return comp, sub, comp_hyper, sub_hyper
 
 class Data():
     def __init__(self, data, all_train, shuffle=False, n_node=None):
         if isinstance(data, tuple):
             data = list(data)
-
         if len(data) == 2:
             self.raw_items = np.array(data[0], dtype=object)
             self.raw_events = None
@@ -374,57 +446,48 @@ class Data():
             self.raw_items = np.array(data[0], dtype=object)
             self.raw_events = np.array(data[1], dtype=object)
             self.targets = np.asarray(data[2])
-
         if isinstance(all_train, list) and len(all_train) == 2 and isinstance(all_train[0], (list, np.ndarray)):
             all_train_items = all_train[0]
             all_train_events = all_train[1]
         else:
             all_train_items = all_train
             all_train_events = None
-
         print(f"Building graphs with n_node={n_node}...")
-
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
-
             adj = data_masks(all_train_items, n_node)
             R = data_R(all_train_items, n_node)
             R1 = data_R1(all_train_items, n_node)
-
             adj_fuzzy = data_masks_fuzzy(all_train_items, n_node, all_events=all_train_events)
             R_fuzzy = data_R_fuzzy(all_train_items, n_node, all_events=all_train_events)
             R1_fuzzy = data_R1_fuzzy(all_train_items, n_node, all_events=all_train_events)
-            comp_adj, sub_adj = data_item_hypergraph_comp_sub(all_train_items, n_node)
-
+            comp_adj, sub_adj, comp_hyper, sub_hyper = data_item_hypergraph_comp_sub(all_train_items, n_node)
             self.adjacency = adj.multiply(1.0 / (adj.sum(axis=0).reshape(1, -1) + 1e-8))
             self.adjacency_T = self.adjacency.T
             self.adjacency1 = R1.multiply(1.0 / (R1.sum(axis=0).reshape(1, -1) + 1e-8))
             self.adjacency_comp = comp_adj.multiply(1.0 / (comp_adj.sum(axis=0).reshape(1, -1) + 1e-8))
             self.adjacency_sub = sub_adj.multiply(1.0 / (sub_adj.sum(axis=0).reshape(1, -1) + 1e-8))
+            self.hyper_comp = comp_hyper
+            self.hyper_sub = sub_hyper
 
             self.adjacency_fuzzy = adj_fuzzy.multiply(1.0 / (adj_fuzzy.sum(axis=0).reshape(1, -1) + 1e-8))
             self.adjacency_T_fuzzy = self.adjacency_fuzzy.T
             self.adjacency1_fuzzy = R1_fuzzy.multiply(1.0 / (R1_fuzzy.sum(axis=0).reshape(1, -1) + 1e-8))
-
             self.adj1 = adj.sum(axis=0).reshape(1, -1)
             self.adj2 = adj.sum(axis=1).reshape(1, -1)
             self.R = R.sum(axis=0).reshape(1, -1)
             self.R1 = R1.sum(axis=0).reshape(1, -1)
-
             self.adj1_fuzzy = adj_fuzzy.sum(axis=0).reshape(1, -1)
             self.adj2_fuzzy = adj_fuzzy.sum(axis=1).reshape(1, -1)
             self.R_fuzzy = R_fuzzy.sum(axis=0).reshape(1, -1)
             self.R1_fuzzy = R1_fuzzy.sum(axis=0).reshape(1, -1)
             self.comp_deg = comp_adj.sum(axis=0).reshape(1, -1)
             self.sub_deg = sub_adj.sum(axis=0).reshape(1, -1)
-
         self.n_node = n_node
         self.length = len(self.raw_items)
         self.shuffle = shuffle
         print(f"Graph construction complete. Raw data shape: {self.raw_items.shape}")
         print(f"Number of sessions: {self.length}")
-
-    # 其余函数 generate_batch/get_slice 保持你原版不变
 
     def generate_batch(self, batch_size):
         if self.shuffle:
@@ -434,7 +497,6 @@ class Data():
             self.targets = self.targets[shuffled_arg]
             if self.raw_events is not None:
                 self.raw_events = self.raw_events[shuffled_arg]
-
         n_batch = int(self.length / batch_size)
         if self.length % batch_size != 0:
             n_batch += 1
@@ -451,52 +513,41 @@ class Data():
             indices = np.array(index, dtype=int)
         else:
             indices = np.array([index], dtype=int)
-
         inp_items = self.raw_items[indices]
         inp_events = self.raw_events[indices] if self.raw_events is not None else None
-
         num_node = []
         for session in inp_items:
             if isinstance(session, np.ndarray):
                 session = session.tolist()
             num_node.append(len([x for x in session if x != 0]))
-
         max_n_node = max(num_node) if num_node else 0
-
         session_len = []
         reversed_sess_item = []
         reversed_sess_event = []
         mask = []
         items_padded = []
         events_padded = []
-
         for idx, session in enumerate(inp_items):
             if isinstance(session, np.ndarray):
                 session = session.tolist()
-
             events = None
             if inp_events is not None:
                 events = inp_events[idx]
                 if isinstance(events, np.ndarray):
                     events = events.tolist()
-
             nonzero_elems = [i for i, x in enumerate(session) if x != 0]
             session_len_val = len(nonzero_elems)
             session_len.append([session_len_val])
-
             padded_session = session + [0] * (max_n_node - session_len_val)
             items_padded.append(padded_session)
-
             mask.append([1] * session_len_val + [0] * (max_n_node - session_len_val))
             reversed_session = list(reversed(session[:session_len_val])) + [0] * (max_n_node - session_len_val)
             reversed_sess_item.append(reversed_session)
-
             if events is not None:
                 padded_events = events + [0] * (max_n_node - session_len_val)
                 events_padded.append(padded_events)
                 reversed_event = list(reversed(events[:session_len_val])) + [0] * (max_n_node - session_len_val)
                 reversed_sess_event.append(reversed_event)
-
         items_array = np.array(items_padded)
         mask_array = np.array(mask)
         reversed_array = np.array(reversed_sess_item)
@@ -506,5 +557,4 @@ class Data():
             events_array = np.array(events_padded)
             reversed_event_array = np.array(reversed_sess_event)
             return self.targets[indices] - 1, session_len_array, items_array, events_array, reversed_array, reversed_event_array, mask_array
-
         return self.targets[indices] - 1, session_len_array, items_array, reversed_array, mask_array

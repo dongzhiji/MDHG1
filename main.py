@@ -6,16 +6,13 @@ import argparse
 import pickle
 import logging
 from datetime import datetime
-
 # 设置日志
 def setup_logging():
     log_dir = 'logs'
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
-
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     log_file = os.path.join(log_dir, f'training_{timestamp}.log')
-
     # 配置logging
     logging.basicConfig(
         level=logging.INFO,
@@ -26,11 +23,9 @@ def setup_logging():
         ]
     )
     return log_file
-
-
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', default='Tmall', help='dataset name: retailrocket/diginetica/Nowplaying/sample')
-parser.add_argument('--epoch', type=int, default=10, help='number of epochs to train for')
+parser.add_argument('--epoch', type=int, default=20, help='number of epochs to train for')
 parser.add_argument('--batchSize', type=int, default=256, help='input batch size')
 parser.add_argument('--embSize', type=int, default=128, help='embedding size')
 parser.add_argument('--l2', type=float, default=1e-5, help='l2 penalty')
@@ -49,9 +44,9 @@ parser.add_argument('--intent_align_weight', type=float, default=0.03, help='wei
 parser.add_argument('--short_intent_min', type=float, default=0.10, help='minimum short-term intent fusion gate')
 parser.add_argument('--short_intent_max', type=float, default=0.45, help='maximum short-term intent fusion gate')
 parser.add_argument('--short_len_factor_min', type=float, default=0.35, help='minimum session-length factor in short-term intent fusion')
+parser.add_argument('--comp_sub_pair_hyper_mix', type=float, default=0.5, help='blend ratio for pairwise vs hypergraph comp/sub embeddings')
 
 opt = parser.parse_args()
-
 # 设置日志文件
 log_file = setup_logging()
 logging.info(f"日志文件: {log_file}")
@@ -119,6 +114,8 @@ def main():
         adjacency1=train_data.adjacency1,
         adjacency_comp=train_data.adjacency_comp,
         adjacency_sub=train_data.adjacency_sub,
+        hyper_comp=train_data.hyper_comp,
+        hyper_sub=train_data.hyper_sub,
         R1=train_data.R1,
         comp_deg=train_data.comp_deg,
         sub_deg=train_data.sub_deg,
@@ -147,7 +144,8 @@ def main():
         intent_align_weight=opt.intent_align_weight,
         short_intent_min=opt.short_intent_min,
         short_intent_max=opt.short_intent_max,
-        short_len_factor_min=opt.short_len_factor_min
+        short_len_factor_min=opt.short_len_factor_min,
+        comp_sub_pair_hyper_mix=opt.comp_sub_pair_hyper_mix
     ))
 
     #reset_parameters(model)
