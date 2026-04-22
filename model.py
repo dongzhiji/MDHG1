@@ -202,6 +202,8 @@ class MDHG(Module):
         self.base_weight_min = 0.10
         self.base_weight_max = 0.70
         self.comp_sub_pair_hyper_mix = comp_sub_pair_hyper_mix
+        self._pos_weight_cache = None
+        self._pos_weight_cache_key = None
         self.init_parameters()
 
     def init_parameters(self):
@@ -225,16 +227,22 @@ class MDHG(Module):
         shape = adjacency.shape
         return torch.sparse.FloatTensor(i, v, torch.Size(shape))
     def calc_repeat_ratio_batch(self, session_item):
-        ratios = []
-        for sess in session_item:
-            seq = sess[sess > 0]
-            seq_len = seq.numel()
-            if seq_len == 0:
-                ratios.append(0.0)
-            else:
-                unique_len = torch.unique(seq).numel()
-                ratios.append(float((seq_len - unique_len) / seq_len))
-        return torch.tensor(ratios, device=session_item.device, dtype=torch.float32)
+        sorted_item, _ = torch.sort(session_item, dim=1)
+        valid = sorted_item > 0
+        is_new_item = torch.ones_like(valid, dtype=torch.bool)
+        is_new_item[:, 1:] = sorted_item[:, 1:] != sorted_item[:, :-1]
+        unique_counts = (valid & is_new_item).sum(dim=1).float()
+        seq_lens = valid.sum(dim=1).float()
+        repeat_counts = seq_lens - unique_counts
+        return torch.where(seq_lens > 0, repeat_counts / seq_lens, torch.zeros_like(seq_lens))
+
+    def get_position_weight(self, seq_len, device):
+        key = (int(seq_len), str(device), float(self.pos_decay))
+        if self._pos_weight_cache is None or self._pos_weight_cache_key != key:
+            pos_ids = torch.arange(seq_len, device=device).float()
+            self._pos_weight_cache = torch.exp(-self.pos_decay * pos_ids).view(1, seq_len, 1)
+            self._pos_weight_cache_key = key
+        return self._pos_weight_cache
     # 机制3：关系置信先验
     def build_fuzzy_relation_prior(self, session_item, reversed_sess_event, repeat_ratio=None):
         if repeat_ratio is None:
@@ -339,8 +347,7 @@ class MDHG(Module):
         item_part = item_embedding[reversed_sess_item]
         event_part = event_embedding[reversed_sess_event]
         event_scales = self.event_scale(reversed_sess_event)
-        pos_ids = torch.arange(seq_len_all, device=item_embedding.device).float()
-        position_weight = torch.exp(-self.pos_decay * pos_ids).view(1, seq_len_all, 1)
+        position_weight = self.get_position_weight(seq_len_all, item_embedding.device)
         seq_h = position_weight * (item_part + event_scales * event_part)
         if session_len.dim() == 1:
             session_len = session_len.unsqueeze(1)
@@ -374,8 +381,7 @@ class MDHG(Module):
         item_part = item_embedding[reversed_sess_item]
         event_part = event_embedding[reversed_sess_event]
         event_scales = self.event_scale(reversed_sess_event)
-        pos_ids = torch.arange(seq_len_all, device=item_embedding.device).float()
-        position_weight = torch.exp(-self.pos_decay * pos_ids).view(1, seq_len_all, 1)
+        position_weight = self.get_position_weight(seq_len_all, item_embedding.device)
         seq_h = position_weight * (item_part + event_scales * event_part)
         if session_len.dim() == 1:
             session_len = session_len.unsqueeze(1)
