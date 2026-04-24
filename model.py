@@ -14,6 +14,15 @@ def trans_to_cpu(variable):
     return variable.cpu() if torch.cuda.is_available() else variable
 
 
+def safe_sparse_mm(adjacency, dense):
+    """
+    Sparse-dense matmul with dtype compatibility for AMP:
+    sparse matmul runs in float32, output is cast back to dense dtype.
+    """
+    out = torch.sparse.mm(adjacency, dense.float())
+    return out.to(dense.dtype) if out.dtype != dense.dtype else out
+
+
 class ItemConv(Module):
     def __init__(self, layers, K1, K2, K3, dropout, alpha, emb_size=100):
         super(ItemConv, self).__init__()
@@ -46,7 +55,7 @@ class ItemConv(Module):
         finalh = []
         for i in range(self.layers):
             item_embeddings = self.w_item[f'weight_item{i}'](item_embeddings)
-            item_embeddings = torch.sparse.mm(adjacency, item_embeddings)
+            item_embeddings = safe_sparse_mm(adjacency, item_embeddings)
 
             H1 = self.w_i1[f'weight_item{channel}'](item_embeddings) + item_embeddings
             H1 = self.relu(H1)
@@ -80,7 +89,7 @@ class HyperGraphConv(Module):
         outs = [F.normalize(x, dim=-1, p=2)]
         for l in range(self.layers):
             x = self.linears[l](x)
-            x = torch.sparse.mm(hyper_propagation, x)
+            x = safe_sparse_mm(hyper_propagation, x)
             x = F.relu(x)
             x = self.dropout(x)
             outs.append(F.normalize(x, dim=-1, p=2))
