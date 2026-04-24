@@ -23,4 +23,5 @@ python main.py --dataset=diginetica
 --sub_topk          替代超边每个锚点商品保留邻居数（默认 8）
 --rel_min_support   互补/替代关系最小支持度（默认 2）
 --sub_context_min   替代上下文最小计数（默认 2）
+--comp_sub_conflict_margin 互补/替代冲突判定边际（默认 0.05）
 ```

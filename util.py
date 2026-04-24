@@ -2,6 +2,17 @@ import numpy as np
 from scipy.sparse import coo_matrix
 import warnings
 EPSILON = 1e-8
+COMP_SUB_DEFAULTS = {
+    'max_gap': 3,
+    'comp_topk': 8,
+    'sub_topk': 8,
+    'min_support': 2,
+    'sub_context_min': 2,
+    'conflict_margin': 0.05
+}
+
+def _ordered_pair(i, j):
+    return (i, j) if i < j else (j, i)
 
 def fuzzy_membership(x, center=1.0, scale=1.0):
     return float(np.exp(-abs(x - center) / max(scale, 1e-8)))
@@ -392,7 +403,7 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3, comp_topk=8, 
                     comp_adj[dst] = dict()
                 comp_adj[src][dst] = comp_adj[src].get(dst, 0.0) + w
                 comp_adj[dst][src] = comp_adj[dst].get(src, 0.0) + w
-                key_ab = (src, dst) if src < dst else (dst, src)
+                key_ab = _ordered_pair(src, dst)
                 comp_support[key_ab] = comp_support.get(key_ab, 0) + 1
 
         # contexts for substitute learning
@@ -431,7 +442,7 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3, comp_topk=8, 
                 w = context_pair_weight(ca, cb)
                 add_sub_pair(ia, ib, w)
                 add_sub_pair(ib, ia, w)
-                key_ab = (ia, ib) if ia < ib else (ib, ia)
+                key_ab = _ordered_pair(ia, ib)
                 sub_support[key_ab] = sub_support.get(key_ab, 0) + int(min(ca, cb))
 
     # substitute: different items leading to same next context
@@ -448,7 +459,7 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3, comp_topk=8, 
                 w = context_pair_weight(ca, cb)
                 add_sub_pair(ia, ib, w)
                 add_sub_pair(ib, ia, w)
-                key_ab = (ia, ib) if ia < ib else (ib, ia)
+                key_ab = _ordered_pair(ia, ib)
                 sub_support[key_ab] = sub_support.get(key_ab, 0) + int(min(ca, cb))
 
     # prune weak relations
@@ -513,12 +524,12 @@ class Data():
             all_train_events = None
         if comp_sub_config is None:
             comp_sub_config = {}
-        max_gap = max(1, int(comp_sub_config.get('max_gap', 3)))
-        comp_topk = max(1, int(comp_sub_config.get('comp_topk', 8)))
-        sub_topk = max(1, int(comp_sub_config.get('sub_topk', 8)))
-        min_support = max(1, int(comp_sub_config.get('min_support', 2)))
-        sub_context_min = max(1, int(comp_sub_config.get('sub_context_min', 2)))
-        conflict_margin = max(0.0, float(comp_sub_config.get('conflict_margin', 0.05)))
+        max_gap = max(1, int(comp_sub_config.get('max_gap', COMP_SUB_DEFAULTS['max_gap'])))
+        comp_topk = max(1, int(comp_sub_config.get('comp_topk', COMP_SUB_DEFAULTS['comp_topk'])))
+        sub_topk = max(1, int(comp_sub_config.get('sub_topk', COMP_SUB_DEFAULTS['sub_topk'])))
+        min_support = max(1, int(comp_sub_config.get('min_support', COMP_SUB_DEFAULTS['min_support'])))
+        sub_context_min = max(1, int(comp_sub_config.get('sub_context_min', COMP_SUB_DEFAULTS['sub_context_min'])))
+        conflict_margin = max(0.0, float(comp_sub_config.get('conflict_margin', COMP_SUB_DEFAULTS['conflict_margin'])))
 
         print(f"Building graphs with n_node={n_node}, max_gap={max_gap}, comp_topk={comp_topk}, sub_topk={sub_topk}, min_support={min_support}, sub_context_min={sub_context_min}, conflict_margin={conflict_margin}...")
         with warnings.catch_warnings():

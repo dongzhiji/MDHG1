@@ -50,6 +50,7 @@ parser.add_argument('--comp_topk', type=int, default=8, help='top-k neighbors pe
 parser.add_argument('--sub_topk', type=int, default=8, help='top-k neighbors per item hyperedge in substitute hypergraph')
 parser.add_argument('--rel_min_support', type=int, default=2, help='minimum support to retain mined comp/sub relation')
 parser.add_argument('--sub_context_min', type=int, default=2, help='minimum context support for substitute mining')
+parser.add_argument('--comp_sub_conflict_margin', type=float, default=0.05, help='margin for resolving comp/sub pair conflicts')
 
 opt = parser.parse_args()
 # 设置日志文件
@@ -124,7 +125,7 @@ def main():
         'sub_topk': opt.sub_topk,
         'min_support': opt.rel_min_support,
         'sub_context_min': opt.sub_context_min,
-        'conflict_margin': 0.05
+        'conflict_margin': opt.comp_sub_conflict_margin
     }
 
     train_data = Data(train_data, all_train, shuffle=False, n_node=n_node, comp_sub_config=comp_sub_config)
