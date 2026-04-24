@@ -16,7 +16,7 @@ def trans_to_cpu(variable):
 
 def safe_sparse_mm(adjacency, dense):
     """
-    Sparse-dense matmul with dtype compatibility for AMP:
+    Sparse-dense matmul with stable dtype boundaries:
     sparse matmul runs in float32, output is cast back to dense dtype.
     """
     out = torch.sparse.mm(adjacency, dense.float())
