@@ -45,6 +45,13 @@ parser.add_argument('--short_intent_min', type=float, default=0.10, help='minimu
 parser.add_argument('--short_intent_max', type=float, default=0.45, help='maximum short-term intent fusion gate')
 parser.add_argument('--short_len_factor_min', type=float, default=0.35, help='minimum session-length factor in short-term intent fusion')
 parser.add_argument('--comp_sub_pair_hyper_mix', type=float, default=0.5, help='blend ratio for pairwise vs hypergraph comp/sub embeddings')
+parser.add_argument('--comp_max_gap', type=int, default=3, help='max sequence distance for complementary relation mining')
+parser.add_argument('--comp_sub_topk', type=int, default=8, help='top-k related items in each comp/sub hyperedge')
+parser.add_argument('--comp_sub_min_neighbors', type=int, default=1, help='minimum neighbors required to form a comp/sub hyperedge')
+parser.add_argument('--comp_sub_min_support', type=float, default=1.0, help='minimum raw relation support before normalization')
+parser.add_argument('--comp_sub_min_norm_weight', type=float, default=0.02, help='minimum normalized relation weight kept in comp/sub graph')
+parser.add_argument('--sub_context_topk', type=int, default=20, help='max candidates per substitute context (prev/next)')
+parser.add_argument('--sub_context_min', type=int, default=2, help='minimum candidates per substitute context')
 
 opt = parser.parse_args()
 # 设置日志文件
@@ -101,8 +108,18 @@ def main():
         n_node = 309
     logging.info(f"数据集: {opt.dataset}, 节点数: {n_node}")
 
-    train_data = Data(train_data, all_train, shuffle=False, n_node=n_node)
-    test_data = Data(test_data, all_train, shuffle=False, n_node=n_node)
+    train_data = Data(
+        train_data, all_train, shuffle=False, n_node=n_node, comp_max_gap=opt.comp_max_gap,
+        comp_sub_topk=opt.comp_sub_topk, comp_sub_min_neighbors=opt.comp_sub_min_neighbors,
+        comp_sub_min_support=opt.comp_sub_min_support, comp_sub_min_norm_weight=opt.comp_sub_min_norm_weight,
+        sub_context_topk=opt.sub_context_topk, sub_context_min=opt.sub_context_min
+    )
+    test_data = Data(
+        test_data, all_train, shuffle=False, n_node=n_node, comp_max_gap=opt.comp_max_gap,
+        comp_sub_topk=opt.comp_sub_topk, comp_sub_min_neighbors=opt.comp_sub_min_neighbors,
+        comp_sub_min_support=opt.comp_sub_min_support, comp_sub_min_norm_weight=opt.comp_sub_min_norm_weight,
+        sub_context_topk=opt.sub_context_topk, sub_context_min=opt.sub_context_min
+    )
 
     logging.info("创建模型...")
     model = trans_to_cuda(MDHG(

@@ -337,7 +337,34 @@ def _incidence_to_hypergraph_propagation(H, n_node):
     return G
 
 
-def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3):
+def _normalize_relation_graph(rel_adj, item_freq, min_support=1.0, min_norm_weight=0.02):
+    normalized = dict()
+    for src, dst_dict in rel_adj.items():
+        if src < 0 or src >= len(item_freq):
+            continue
+        src_freq = item_freq[src]
+        if src_freq <= 0:
+            continue
+        for dst, weight in dst_dict.items():
+            if src == dst or dst < 0 or dst >= len(item_freq):
+                continue
+            if weight < min_support:
+                continue
+            dst_freq = item_freq[dst]
+            if dst_freq <= 0:
+                continue
+            norm_w = float(weight / np.sqrt(src_freq * dst_freq + EPSILON))
+            if norm_w < min_norm_weight:
+                continue
+            if src not in normalized:
+                normalized[src] = dict()
+            normalized[src][dst] = norm_w
+    return normalized
+
+
+def data_item_hypergraph_comp_sub(
+        all_sessions, n_node, max_gap=3, topk=8, min_neighbors=1,
+        min_support=1.0, min_norm_weight=0.02, sub_context_topk=20, sub_context_min=2):
     """
     Build item-view hypergraph relations learned from sessions.
 
@@ -353,6 +380,7 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3):
     """
     comp_adj = dict()
     sub_adj = dict()
+    item_freq = np.zeros(n_node, dtype=np.float32)
     prev_to_next = dict()
     next_to_prev = dict()
     dist_weights = [1.0 / d for d in range(1, max_gap + 1)]
@@ -365,6 +393,8 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3):
         seq = [x - 1 for x in sess if x != 0 and 1 <= x <= n_node]
         if len(seq) <= 1:
             continue
+        for item_id in seq:
+            item_freq[item_id] += 1.0
 
         # complementary: close-by ordered co-occurrence in the same session
         for i in range(len(seq)):
@@ -406,7 +436,11 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3):
 
     # substitute: different items competing under same previous context
     for _, nxt_dict in prev_to_next.items():
-        items = list(nxt_dict.items())
+        items = sorted(
+            nxt_dict.items(), key=lambda item_count_pair: item_count_pair[1], reverse=True
+        )[:sub_context_topk]
+        if len(items) < sub_context_min:
+            continue
         for a in range(len(items)):
             ia, ca = items[a]
             for b in range(a + 1, len(items)):
@@ -417,7 +451,11 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3):
 
     # substitute: different items leading to same next context
     for _, prv_dict in next_to_prev.items():
-        items = list(prv_dict.items())
+        items = sorted(
+            prv_dict.items(), key=lambda item_count_pair: item_count_pair[1], reverse=True
+        )[:sub_context_topk]
+        if len(items) < sub_context_min:
+            continue
         for a in range(len(items)):
             ia, ca = items[a]
             for b in range(a + 1, len(items)):
@@ -426,16 +464,21 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3):
                 add_sub_pair(ia, ib, w)
                 add_sub_pair(ib, ia, w)
 
+    comp_adj = _normalize_relation_graph(comp_adj, item_freq, min_support=min_support, min_norm_weight=min_norm_weight)
+    sub_adj = _normalize_relation_graph(sub_adj, item_freq, min_support=min_support, min_norm_weight=min_norm_weight)
     comp = _dict_to_coo_with_self_loop(comp_adj, n_node, self_loop=1.0)
     sub = _dict_to_coo_with_self_loop(sub_adj, n_node, self_loop=1.0)
-    comp_H = _build_anchor_item_hyperedges(comp_adj, n_node, topk=8, min_neighbors=1)
-    sub_H = _build_anchor_item_hyperedges(sub_adj, n_node, topk=8, min_neighbors=1)
+    comp_H = _build_anchor_item_hyperedges(comp_adj, n_node, topk=topk, min_neighbors=min_neighbors)
+    sub_H = _build_anchor_item_hyperedges(sub_adj, n_node, topk=topk, min_neighbors=min_neighbors)
     comp_hyper = _incidence_to_hypergraph_propagation(comp_H, n_node)
     sub_hyper = _incidence_to_hypergraph_propagation(sub_H, n_node)
     return comp, sub, comp_hyper, sub_hyper
 
 class Data():
-    def __init__(self, data, all_train, shuffle=False, n_node=None):
+    def __init__(
+            self, data, all_train, shuffle=False, n_node=None, comp_max_gap=3, comp_sub_topk=8,
+            comp_sub_min_neighbors=1, comp_sub_min_support=1.0, comp_sub_min_norm_weight=0.02,
+            sub_context_topk=20, sub_context_min=2):
         if isinstance(data, tuple):
             data = list(data)
         if len(data) == 2:
@@ -461,7 +504,12 @@ class Data():
             adj_fuzzy = data_masks_fuzzy(all_train_items, n_node, all_events=all_train_events)
             R_fuzzy = data_R_fuzzy(all_train_items, n_node, all_events=all_train_events)
             R1_fuzzy = data_R1_fuzzy(all_train_items, n_node, all_events=all_train_events)
-            comp_adj, sub_adj, comp_hyper, sub_hyper = data_item_hypergraph_comp_sub(all_train_items, n_node)
+            comp_adj, sub_adj, comp_hyper, sub_hyper = data_item_hypergraph_comp_sub(
+                all_train_items, n_node, max_gap=comp_max_gap, topk=comp_sub_topk,
+                min_neighbors=comp_sub_min_neighbors, min_support=comp_sub_min_support,
+                min_norm_weight=comp_sub_min_norm_weight, sub_context_topk=sub_context_topk,
+                sub_context_min=sub_context_min
+            )
             self.adjacency = adj.multiply(1.0 / (adj.sum(axis=0).reshape(1, -1) + 1e-8))
             self.adjacency_T = self.adjacency.T
             self.adjacency1 = R1.multiply(1.0 / (R1.sum(axis=0).reshape(1, -1) + 1e-8))
