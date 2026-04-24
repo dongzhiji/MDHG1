@@ -52,6 +52,10 @@ parser.add_argument('--comp_sub_min_support', type=float, default=1.0, help='min
 parser.add_argument('--comp_sub_min_norm_weight', type=float, default=0.02, help='minimum normalized relation weight kept in comp/sub graph')
 parser.add_argument('--sub_context_topk', type=int, default=20, help='max candidates per substitute context (prev/next)')
 parser.add_argument('--sub_context_min', type=int, default=2, help='minimum candidates per substitute context')
+parser.add_argument('--comp_symmetric', type=int, default=1, help='whether complementary relation graph is symmetric (1) or directed (0)')
+parser.add_argument('--comp_sub_cache', type=int, default=1, help='enable cache for item-level comp/sub relation mining')
+parser.add_argument('--comp_sub_cache_dir', default='', help='cache directory for mined comp/sub relation graphs')
+parser.add_argument('--amp', type=int, default=1, help='enable mixed precision training when CUDA is available')
 
 opt = parser.parse_args()
 # 设置日志文件
@@ -112,13 +116,21 @@ def main():
         train_data, all_train, shuffle=False, n_node=n_node, comp_max_gap=opt.comp_max_gap,
         comp_sub_topk=opt.comp_sub_topk, comp_sub_min_neighbors=opt.comp_sub_min_neighbors,
         comp_sub_min_support=opt.comp_sub_min_support, comp_sub_min_norm_weight=opt.comp_sub_min_norm_weight,
-        sub_context_topk=opt.sub_context_topk, sub_context_min=opt.sub_context_min
+        sub_context_topk=opt.sub_context_topk, sub_context_min=opt.sub_context_min,
+        comp_symmetric=bool(opt.comp_symmetric),
+        comp_sub_cache=bool(opt.comp_sub_cache),
+        comp_sub_cache_dir=(opt.comp_sub_cache_dir if opt.comp_sub_cache_dir else os.path.join('datasets', opt.dataset, 'graph_cache')),
+        cache_prefix=f"{opt.dataset}_train"
     )
     test_data = Data(
         test_data, all_train, shuffle=False, n_node=n_node, comp_max_gap=opt.comp_max_gap,
         comp_sub_topk=opt.comp_sub_topk, comp_sub_min_neighbors=opt.comp_sub_min_neighbors,
         comp_sub_min_support=opt.comp_sub_min_support, comp_sub_min_norm_weight=opt.comp_sub_min_norm_weight,
-        sub_context_topk=opt.sub_context_topk, sub_context_min=opt.sub_context_min
+        sub_context_topk=opt.sub_context_topk, sub_context_min=opt.sub_context_min,
+        comp_symmetric=bool(opt.comp_symmetric),
+        comp_sub_cache=bool(opt.comp_sub_cache),
+        comp_sub_cache_dir=(opt.comp_sub_cache_dir if opt.comp_sub_cache_dir else os.path.join('datasets', opt.dataset, 'graph_cache')),
+        cache_prefix=f"{opt.dataset}_train"
     )
 
     logging.info("创建模型...")
@@ -162,7 +174,8 @@ def main():
         short_intent_min=opt.short_intent_min,
         short_intent_max=opt.short_intent_max,
         short_len_factor_min=opt.short_len_factor_min,
-        comp_sub_pair_hyper_mix=opt.comp_sub_pair_hyper_mix
+        comp_sub_pair_hyper_mix=opt.comp_sub_pair_hyper_mix,
+        use_amp=bool(opt.amp)
     ))
 
     #reset_parameters(model)

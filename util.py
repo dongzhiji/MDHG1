@@ -1,6 +1,10 @@
 import numpy as np
 from scipy.sparse import coo_matrix
 import warnings
+import os
+import pickle
+import hashlib
+import json
 EPSILON = 1e-8
 
 def fuzzy_membership(x, center=1.0, scale=1.0):
@@ -364,7 +368,8 @@ def _normalize_relation_graph(rel_adj, item_freq, min_support=1.0, min_norm_weig
 
 def data_item_hypergraph_comp_sub(
         all_sessions, n_node, max_gap=3, topk=8, min_neighbors=1,
-        min_support=1.0, min_norm_weight=0.02, sub_context_topk=20, sub_context_min=2):
+        min_support=1.0, min_norm_weight=0.02, sub_context_topk=20, sub_context_min=2,
+        comp_symmetric=True):
     """
     Build item-view hypergraph relations learned from sessions.
 
@@ -407,10 +412,11 @@ def data_item_hypergraph_comp_sub(
                 w = dist_weights[j - i - 1]
                 if src not in comp_adj:
                     comp_adj[src] = dict()
-                if dst not in comp_adj:
-                    comp_adj[dst] = dict()
                 comp_adj[src][dst] = comp_adj[src].get(dst, 0.0) + w
-                comp_adj[dst][src] = comp_adj[dst].get(src, 0.0) + w
+                if comp_symmetric:
+                    if dst not in comp_adj:
+                        comp_adj[dst] = dict()
+                    comp_adj[dst][src] = comp_adj[dst].get(src, 0.0) + w
 
         # contexts for substitute learning
         for i in range(len(seq) - 1):
@@ -474,11 +480,75 @@ def data_item_hypergraph_comp_sub(
     sub_hyper = _incidence_to_hypergraph_propagation(sub_H, n_node)
     return comp, sub, comp_hyper, sub_hyper
 
+
+def _session_fingerprint(all_sessions):
+    total_len = 0
+    total_nonzero = 0
+    weighted_sum = 0
+    weighted_sq_sum = 0
+    for idx, sess in enumerate(all_sessions):
+        for pos, item in enumerate(sess):
+            val = int(item)
+            total_len += 1
+            if val != 0:
+                total_nonzero += 1
+                w = (idx + 1) * (pos + 1)
+                weighted_sum += val * w
+                weighted_sq_sum += (val * val) * (w + 7)
+    return f"{len(all_sessions)}_{total_len}_{total_nonzero}_{weighted_sum % 1000000007}_{weighted_sq_sum % 1000000007}"
+
+
+def load_or_build_item_hypergraph_comp_sub(
+        all_sessions, n_node, cache_enabled=True, cache_dir=None, cache_prefix="default",
+        max_gap=3, topk=8, min_neighbors=1, min_support=1.0, min_norm_weight=0.02,
+        sub_context_topk=20, sub_context_min=2, comp_symmetric=True):
+    cache_file = None
+    if cache_enabled:
+        cache_dir = cache_dir or os.path.join("datasets", "graph_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_meta = {
+            "n_node": int(n_node),
+            "max_gap": int(max_gap),
+            "topk": int(topk),
+            "min_neighbors": int(min_neighbors),
+            "min_support": float(min_support),
+            "min_norm_weight": float(min_norm_weight),
+            "sub_context_topk": int(sub_context_topk),
+            "sub_context_min": int(sub_context_min),
+            "comp_symmetric": bool(comp_symmetric),
+            "session_fp": _session_fingerprint(all_sessions),
+        }
+        cache_key = hashlib.md5(json.dumps(cache_meta, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+        cache_file = os.path.join(cache_dir, f"{cache_prefix}_item_comp_sub_{cache_key}.pkl")
+        if os.path.exists(cache_file):
+            with open(cache_file, "rb") as f:
+                payload = pickle.load(f)
+            return payload["comp_adj"], payload["sub_adj"], payload["comp_hyper"], payload["sub_hyper"]
+
+    comp_adj, sub_adj, comp_hyper, sub_hyper = data_item_hypergraph_comp_sub(
+        all_sessions, n_node, max_gap=max_gap, topk=topk, min_neighbors=min_neighbors,
+        min_support=min_support, min_norm_weight=min_norm_weight, sub_context_topk=sub_context_topk,
+        sub_context_min=sub_context_min, comp_symmetric=comp_symmetric
+    )
+
+    if cache_file is not None:
+        with open(cache_file, "wb") as f:
+            pickle.dump(
+                {
+                    "comp_adj": comp_adj.tocoo(),
+                    "sub_adj": sub_adj.tocoo(),
+                    "comp_hyper": comp_hyper.tocoo(),
+                    "sub_hyper": sub_hyper.tocoo(),
+                }, f, protocol=pickle.HIGHEST_PROTOCOL
+            )
+    return comp_adj, sub_adj, comp_hyper, sub_hyper
+
 class Data():
     def __init__(
             self, data, all_train, shuffle=False, n_node=None, comp_max_gap=3, comp_sub_topk=8,
             comp_sub_min_neighbors=1, comp_sub_min_support=1.0, comp_sub_min_norm_weight=0.02,
-            sub_context_topk=20, sub_context_min=2):
+            sub_context_topk=20, sub_context_min=2, comp_symmetric=True,
+            comp_sub_cache=True, comp_sub_cache_dir=None, cache_prefix="default"):
         if isinstance(data, tuple):
             data = list(data)
         if len(data) == 2:
@@ -504,11 +574,12 @@ class Data():
             adj_fuzzy = data_masks_fuzzy(all_train_items, n_node, all_events=all_train_events)
             R_fuzzy = data_R_fuzzy(all_train_items, n_node, all_events=all_train_events)
             R1_fuzzy = data_R1_fuzzy(all_train_items, n_node, all_events=all_train_events)
-            comp_adj, sub_adj, comp_hyper, sub_hyper = data_item_hypergraph_comp_sub(
-                all_train_items, n_node, max_gap=comp_max_gap, topk=comp_sub_topk,
+            comp_adj, sub_adj, comp_hyper, sub_hyper = load_or_build_item_hypergraph_comp_sub(
+                all_train_items, n_node, cache_enabled=comp_sub_cache, cache_dir=comp_sub_cache_dir,
+                cache_prefix=cache_prefix, max_gap=comp_max_gap, topk=comp_sub_topk,
                 min_neighbors=comp_sub_min_neighbors, min_support=comp_sub_min_support,
                 min_norm_weight=comp_sub_min_norm_weight, sub_context_topk=sub_context_topk,
-                sub_context_min=sub_context_min
+                sub_context_min=sub_context_min, comp_symmetric=comp_symmetric
             )
             self.adjacency = adj.multiply(1.0 / (adj.sum(axis=0).reshape(1, -1) + 1e-8))
             self.adjacency_T = self.adjacency.T
