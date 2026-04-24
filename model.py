@@ -103,7 +103,7 @@ class MDHG(Module):
                  n_node, lr, layers, l2, beta, lam, eps, dataset,
                  K1, K2, K3, dropout, alpha, emb_size=100, batch_size=100,
                  intent_align_weight=0.03, short_intent_min=0.10, short_intent_max=0.45,
-                 short_len_factor_min=0.35, comp_sub_pair_hyper_mix=0.5, use_amp=False):
+                 short_len_factor_min=0.35, comp_sub_pair_hyper_mix=0.5):
         super(MDHG, self).__init__()
         self.emb_size = emb_size
         self.batch_size = batch_size
@@ -576,7 +576,7 @@ def train_test(model, train_data, test_data, epoch):
     print('start training: ', datetime.datetime.now())
     total_loss = 0.0
     slices = train_data.generate_batch(model.batch_size)
-    amp_enabled = bool(getattr(model, "use_amp", False))
+    amp_enabled = model.use_amp
     scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
 
     model.train()

@@ -62,6 +62,8 @@ opt = parser.parse_args()
 log_file = setup_logging()
 logging.info(f"日志文件: {log_file}")
 logging.info(f"运行参数: {opt}")
+if opt.amp:
+    logging.warning("参数 --amp 已废弃且会被忽略，当前固定不使用AMP。")
 
 if torch.cuda.is_available():
     os.environ['CUDA_VISIBLE_DEVICES'] = str(opt.gpu_id)
@@ -175,8 +177,7 @@ def main():
         short_intent_min=opt.short_intent_min,
         short_intent_max=opt.short_intent_max,
         short_len_factor_min=opt.short_len_factor_min,
-        comp_sub_pair_hyper_mix=opt.comp_sub_pair_hyper_mix,
-        use_amp=False
+        comp_sub_pair_hyper_mix=opt.comp_sub_pair_hyper_mix
     ))
 
     #reset_parameters(model)
