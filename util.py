@@ -337,7 +337,8 @@ def _incidence_to_hypergraph_propagation(H, n_node):
     return G
 
 
-def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3):
+def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3, comp_topk=8, sub_topk=8,
+                                  min_support=2, sub_context_min=2, conflict_margin=0.05):
     """
     Build item-view hypergraph relations learned from sessions.
 
@@ -353,6 +354,9 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3):
     """
     comp_adj = dict()
     sub_adj = dict()
+    comp_support = dict()
+    sub_support = dict()
+    item_freq = np.zeros(n_node, dtype=np.float32)
     prev_to_next = dict()
     next_to_prev = dict()
     dist_weights = [1.0 / d for d in range(1, max_gap + 1)]
@@ -365,6 +369,8 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3):
         seq = [x - 1 for x in sess if x != 0 and 1 <= x <= n_node]
         if len(seq) <= 1:
             continue
+        for it in seq:
+            item_freq[it] += 1.0
 
         # complementary: close-by ordered co-occurrence in the same session
         for i in range(len(seq)):
@@ -381,6 +387,8 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3):
                     comp_adj[dst] = dict()
                 comp_adj[src][dst] = comp_adj[src].get(dst, 0.0) + w
                 comp_adj[dst][src] = comp_adj[dst].get(src, 0.0) + w
+                key_ab = (src, dst) if src < dst else (dst, src)
+                comp_support[key_ab] = comp_support.get(key_ab, 0) + 1
 
         # contexts for substitute learning
         for i in range(len(seq) - 1):
@@ -409,33 +417,79 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3):
         items = list(nxt_dict.items())
         for a in range(len(items)):
             ia, ca = items[a]
+            if ca < sub_context_min:
+                continue
             for b in range(a + 1, len(items)):
                 ib, cb = items[b]
+                if cb < sub_context_min:
+                    continue
                 w = context_pair_weight(ca, cb)
                 add_sub_pair(ia, ib, w)
                 add_sub_pair(ib, ia, w)
+                key_ab = (ia, ib) if ia < ib else (ib, ia)
+                sub_support[key_ab] = sub_support.get(key_ab, 0) + int(min(ca, cb))
 
     # substitute: different items leading to same next context
     for _, prv_dict in next_to_prev.items():
         items = list(prv_dict.items())
         for a in range(len(items)):
             ia, ca = items[a]
+            if ca < sub_context_min:
+                continue
             for b in range(a + 1, len(items)):
                 ib, cb = items[b]
+                if cb < sub_context_min:
+                    continue
                 w = context_pair_weight(ca, cb)
                 add_sub_pair(ia, ib, w)
                 add_sub_pair(ib, ia, w)
+                key_ab = (ia, ib) if ia < ib else (ib, ia)
+                sub_support[key_ab] = sub_support.get(key_ab, 0) + int(min(ca, cb))
+
+    # prune weak relations
+    for (ia, ib), support in list(comp_support.items()):
+        if support < min_support:
+            if ia in comp_adj and ib in comp_adj[ia]:
+                del comp_adj[ia][ib]
+            if ib in comp_adj and ia in comp_adj[ib]:
+                del comp_adj[ib][ia]
+            del comp_support[(ia, ib)]
+
+    for (ia, ib), support in list(sub_support.items()):
+        if support < min_support:
+            if ia in sub_adj and ib in sub_adj[ia]:
+                del sub_adj[ia][ib]
+            if ib in sub_adj and ia in sub_adj[ib]:
+                del sub_adj[ib][ia]
+            del sub_support[(ia, ib)]
+
+    # resolve comp/sub conflicts based on normalized strengths
+    overlap_pairs = set(comp_support.keys()) & set(sub_support.keys())
+    for ia, ib in overlap_pairs:
+        norm = np.sqrt(max(item_freq[ia], 1.0) * max(item_freq[ib], 1.0))
+        comp_strength = comp_support[(ia, ib)] / (norm + EPSILON)
+        sub_strength = sub_support[(ia, ib)] / (norm + EPSILON)
+        if comp_strength >= sub_strength + conflict_margin:
+            if ia in sub_adj and ib in sub_adj[ia]:
+                del sub_adj[ia][ib]
+            if ib in sub_adj and ia in sub_adj[ib]:
+                del sub_adj[ib][ia]
+        elif sub_strength >= comp_strength + conflict_margin:
+            if ia in comp_adj and ib in comp_adj[ia]:
+                del comp_adj[ia][ib]
+            if ib in comp_adj and ia in comp_adj[ib]:
+                del comp_adj[ib][ia]
 
     comp = _dict_to_coo_with_self_loop(comp_adj, n_node, self_loop=1.0)
     sub = _dict_to_coo_with_self_loop(sub_adj, n_node, self_loop=1.0)
-    comp_H = _build_anchor_item_hyperedges(comp_adj, n_node, topk=8, min_neighbors=1)
-    sub_H = _build_anchor_item_hyperedges(sub_adj, n_node, topk=8, min_neighbors=1)
+    comp_H = _build_anchor_item_hyperedges(comp_adj, n_node, topk=comp_topk, min_neighbors=1)
+    sub_H = _build_anchor_item_hyperedges(sub_adj, n_node, topk=sub_topk, min_neighbors=1)
     comp_hyper = _incidence_to_hypergraph_propagation(comp_H, n_node)
     sub_hyper = _incidence_to_hypergraph_propagation(sub_H, n_node)
     return comp, sub, comp_hyper, sub_hyper
 
 class Data():
-    def __init__(self, data, all_train, shuffle=False, n_node=None):
+    def __init__(self, data, all_train, shuffle=False, n_node=None, comp_sub_config=None):
         if isinstance(data, tuple):
             data = list(data)
         if len(data) == 2:
@@ -452,7 +506,15 @@ class Data():
         else:
             all_train_items = all_train
             all_train_events = None
-        print(f"Building graphs with n_node={n_node}...")
+        if comp_sub_config is None:
+            comp_sub_config = {}
+        max_gap = max(1, int(comp_sub_config.get('max_gap', 3)))
+        comp_topk = max(1, int(comp_sub_config.get('comp_topk', 8)))
+        sub_topk = max(1, int(comp_sub_config.get('sub_topk', 8)))
+        min_support = max(1, int(comp_sub_config.get('min_support', 2)))
+        sub_context_min = max(1, int(comp_sub_config.get('sub_context_min', 2)))
+
+        print(f"Building graphs with n_node={n_node}, max_gap={max_gap}, comp_topk={comp_topk}, sub_topk={sub_topk}, min_support={min_support}, sub_context_min={sub_context_min}...")
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
             adj = data_masks(all_train_items, n_node)
@@ -461,7 +523,15 @@ class Data():
             adj_fuzzy = data_masks_fuzzy(all_train_items, n_node, all_events=all_train_events)
             R_fuzzy = data_R_fuzzy(all_train_items, n_node, all_events=all_train_events)
             R1_fuzzy = data_R1_fuzzy(all_train_items, n_node, all_events=all_train_events)
-            comp_adj, sub_adj, comp_hyper, sub_hyper = data_item_hypergraph_comp_sub(all_train_items, n_node)
+            comp_adj, sub_adj, comp_hyper, sub_hyper = data_item_hypergraph_comp_sub(
+                all_train_items,
+                n_node,
+                max_gap=max_gap,
+                comp_topk=comp_topk,
+                sub_topk=sub_topk,
+                min_support=min_support,
+                sub_context_min=sub_context_min
+            )
             self.adjacency = adj.multiply(1.0 / (adj.sum(axis=0).reshape(1, -1) + 1e-8))
             self.adjacency_T = self.adjacency.T
             self.adjacency1 = R1.multiply(1.0 / (R1.sum(axis=0).reshape(1, -1) + 1e-8))

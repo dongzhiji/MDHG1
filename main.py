@@ -45,6 +45,11 @@ parser.add_argument('--short_intent_min', type=float, default=0.10, help='minimu
 parser.add_argument('--short_intent_max', type=float, default=0.45, help='maximum short-term intent fusion gate')
 parser.add_argument('--short_len_factor_min', type=float, default=0.35, help='minimum session-length factor in short-term intent fusion')
 parser.add_argument('--comp_sub_pair_hyper_mix', type=float, default=0.5, help='blend ratio for pairwise vs hypergraph comp/sub embeddings')
+parser.add_argument('--comp_max_gap', type=int, default=3, help='max gap for complementary co-occurrence mining')
+parser.add_argument('--comp_topk', type=int, default=8, help='top-k neighbors per item hyperedge in complementary hypergraph')
+parser.add_argument('--sub_topk', type=int, default=8, help='top-k neighbors per item hyperedge in substitute hypergraph')
+parser.add_argument('--rel_min_support', type=int, default=2, help='minimum support to retain mined comp/sub relation')
+parser.add_argument('--sub_context_min', type=int, default=2, help='minimum context support for substitute mining')
 
 opt = parser.parse_args()
 # 设置日志文件
@@ -79,13 +84,26 @@ def init_seed(seed=None):
     torch.cuda.manual_seed_all(seed)
     logging.info(f"Random seed set to: {seed}")
 
+def canonical_dataset_name(dataset_name):
+    name = str(dataset_name).strip().lower()
+    dataset_alias = {
+        'tmall': 'Tmall',
+        'retailrocket': 'retailrocket',
+        'diginetica': 'diginetica',
+        'amazon': 'amazon',
+        'lastfm': 'lastfm'
+    }
+    return dataset_alias.get(name, dataset_name)
+
 def main():
     logging.info("=" * 60)
     logging.info("开始加载数据...")
 
-    train_data = pickle.load(open('datasets/' + opt.dataset + '/train.txt', 'rb'))
-    test_data = pickle.load(open('datasets/' + opt.dataset + '/test.txt', 'rb'))
-    all_train = pickle.load(open('datasets/' + opt.dataset + '/all_train_seq.txt', 'rb'))
+    opt.dataset = canonical_dataset_name(opt.dataset)
+    dataset_path = os.path.join('datasets', opt.dataset)
+    train_data = pickle.load(open(os.path.join(dataset_path, 'train.txt'), 'rb'))
+    test_data = pickle.load(open(os.path.join(dataset_path, 'test.txt'), 'rb'))
+    all_train = pickle.load(open(os.path.join(dataset_path, 'all_train_seq.txt'), 'rb'))
 
     if opt.dataset == 'Tmall':
         n_node = 40727
@@ -100,9 +118,16 @@ def main():
     else:
         n_node = 309
     logging.info(f"数据集: {opt.dataset}, 节点数: {n_node}")
+    comp_sub_config = {
+        'max_gap': opt.comp_max_gap,
+        'comp_topk': opt.comp_topk,
+        'sub_topk': opt.sub_topk,
+        'min_support': opt.rel_min_support,
+        'sub_context_min': opt.sub_context_min
+    }
 
-    train_data = Data(train_data, all_train, shuffle=False, n_node=n_node)
-    test_data = Data(test_data, all_train, shuffle=False, n_node=n_node)
+    train_data = Data(train_data, all_train, shuffle=False, n_node=n_node, comp_sub_config=comp_sub_config)
+    test_data = Data(test_data, all_train, shuffle=False, n_node=n_node, comp_sub_config=comp_sub_config)
 
     logging.info("创建模型...")
     model = trans_to_cuda(MDHG(
