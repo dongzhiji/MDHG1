@@ -108,13 +108,13 @@ def main():
 
     if dataset_name == 'Tmall':
         n_node = 40727
-    elif dataset_name == 'retailrocket':#最大的 item ID = 36968
+    elif dataset_name == 'retailrocket':  # 最大的 item ID = 36968
         n_node = 36968
     elif dataset_name == 'amazon':
         n_node = 18888
-    elif dataset_name == 'lastfm':#最大的 item ID = 38997
+    elif dataset_name == 'lastfm':  # 最大的 item ID = 38997
         n_node = 38997
-    elif dataset_name == 'diginetica':#最大的 item ID = 43097
+    elif dataset_name == 'diginetica':  # 最大的 item ID = 43097
         n_node = 43097
     else:
         n_node = 309

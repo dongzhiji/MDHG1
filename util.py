@@ -483,8 +483,9 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3, comp_topk=8, 
     overlap_pairs = set(comp_support.keys()) & set(sub_support.keys())
     for ia, ib in overlap_pairs:
         norm = np.sqrt(max(item_freq[ia], EPSILON) * max(item_freq[ib], EPSILON))
-        comp_strength = comp_support[(ia, ib)] / (norm + 1e-8)
-        sub_strength = sub_support[(ia, ib)] / (norm + 1e-8)
+        norm = max(norm, EPSILON)
+        comp_strength = comp_support[(ia, ib)] / norm
+        sub_strength = sub_support[(ia, ib)] / norm
         if comp_strength >= sub_strength + conflict_margin:
             if ia in sub_adj and ib in sub_adj[ia]:
                 del sub_adj[ia][ib]
