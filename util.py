@@ -482,7 +482,7 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3, comp_topk=8, 
     # resolve comp/sub conflicts based on normalized strengths
     overlap_pairs = set(comp_support.keys()) & set(sub_support.keys())
     for ia, ib in overlap_pairs:
-        norm = np.sqrt(max(item_freq[ia], 1.0) * max(item_freq[ib], 1.0))
+        norm = np.sqrt(max(item_freq[ia], EPSILON) * max(item_freq[ib], EPSILON))
         comp_strength = comp_support[(ia, ib)] / (norm + 1e-8)
         sub_strength = sub_support[(ia, ib)] / (norm + 1e-8)
         if comp_strength >= sub_strength + conflict_margin:
