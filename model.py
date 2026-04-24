@@ -103,7 +103,7 @@ class MDHG(Module):
                  n_node, lr, layers, l2, beta, lam, eps, dataset,
                  K1, K2, K3, dropout, alpha, emb_size=100, batch_size=100,
                  intent_align_weight=0.03, short_intent_min=0.10, short_intent_max=0.45,
-                 short_len_factor_min=0.35, comp_sub_pair_hyper_mix=0.5, use_amp=True):
+                 short_len_factor_min=0.35, comp_sub_pair_hyper_mix=0.5, use_amp=False):
         super(MDHG, self).__init__()
         self.emb_size = emb_size
         self.batch_size = batch_size
@@ -111,7 +111,7 @@ class MDHG(Module):
         self.dataset = dataset
         self.lr = lr
         self.layers = layers
-        self.use_amp = bool(use_amp and torch.cuda.is_available())
+        self.use_amp = False
         self.w_k = 10
         self.numerical_eps = 1e-8
         self.adjacency = trans_to_cuda(self.trans_adj(adjacency))

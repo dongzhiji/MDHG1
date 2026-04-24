@@ -55,7 +55,7 @@ parser.add_argument('--sub_context_min', type=int, default=2, help='minimum cand
 parser.add_argument('--comp_symmetric', type=int, default=1, help='whether complementary relation graph is symmetric (1) or directed (0)')
 parser.add_argument('--comp_sub_cache', type=int, default=1, help='enable cache for item-level comp/sub relation mining')
 parser.add_argument('--comp_sub_cache_dir', default='', help='cache directory for mined comp/sub relation graphs')
-parser.add_argument('--amp', type=int, default=1, help='enable mixed precision training when CUDA is available')
+parser.add_argument('--amp', type=int, default=0, help='deprecated: AMP is disabled and this flag is ignored')
 
 opt = parser.parse_args()
 # 设置日志文件
@@ -176,7 +176,7 @@ def main():
         short_intent_max=opt.short_intent_max,
         short_len_factor_min=opt.short_len_factor_min,
         comp_sub_pair_hyper_mix=opt.comp_sub_pair_hyper_mix,
-        use_amp=bool(opt.amp)
+        use_amp=False
     ))
 
     #reset_parameters(model)
