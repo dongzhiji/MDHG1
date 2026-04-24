@@ -346,6 +346,11 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3, comp_topk=8, 
         all_sessions: list of session item sequences.
         n_node: total number of items.
         max_gap: maximum distance window for complementary relation extraction.
+        comp_topk: top-k neighbors retained per anchor item in complementary hyperedges.
+        sub_topk: top-k neighbors retained per anchor item in substitute hyperedges.
+        min_support: minimum pair support to keep complementary/substitute relation edges.
+        sub_context_min: minimum transition count for a context item to contribute substitute pairs.
+        conflict_margin: minimum normalized strength margin used to decide comp/sub conflicts.
 
     Returns:
         A tuple (comp_adj, sub_adj, comp_hyper, sub_hyper):
@@ -467,8 +472,8 @@ def data_item_hypergraph_comp_sub(all_sessions, n_node, max_gap=3, comp_topk=8, 
     overlap_pairs = set(comp_support.keys()) & set(sub_support.keys())
     for ia, ib in overlap_pairs:
         norm = np.sqrt(max(item_freq[ia], 1.0) * max(item_freq[ib], 1.0))
-        comp_strength = comp_support[(ia, ib)] / (norm + EPSILON)
-        sub_strength = sub_support[(ia, ib)] / (norm + EPSILON)
+        comp_strength = comp_support[(ia, ib)] / (norm + 1e-8)
+        sub_strength = sub_support[(ia, ib)] / (norm + 1e-8)
         if comp_strength >= sub_strength + conflict_margin:
             if ia in sub_adj and ib in sub_adj[ia]:
                 del sub_adj[ia][ib]
@@ -513,8 +518,9 @@ class Data():
         sub_topk = max(1, int(comp_sub_config.get('sub_topk', 8)))
         min_support = max(1, int(comp_sub_config.get('min_support', 2)))
         sub_context_min = max(1, int(comp_sub_config.get('sub_context_min', 2)))
+        conflict_margin = max(0.0, float(comp_sub_config.get('conflict_margin', 0.05)))
 
-        print(f"Building graphs with n_node={n_node}, max_gap={max_gap}, comp_topk={comp_topk}, sub_topk={sub_topk}, min_support={min_support}, sub_context_min={sub_context_min}...")
+        print(f"Building graphs with n_node={n_node}, max_gap={max_gap}, comp_topk={comp_topk}, sub_topk={sub_topk}, min_support={min_support}, sub_context_min={sub_context_min}, conflict_margin={conflict_margin}...")
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
             adj = data_masks(all_train_items, n_node)
@@ -530,7 +536,8 @@ class Data():
                 comp_topk=comp_topk,
                 sub_topk=sub_topk,
                 min_support=min_support,
-                sub_context_min=sub_context_min
+                sub_context_min=sub_context_min,
+                conflict_margin=conflict_margin
             )
             self.adjacency = adj.multiply(1.0 / (adj.sum(axis=0).reshape(1, -1) + 1e-8))
             self.adjacency_T = self.adjacency.T

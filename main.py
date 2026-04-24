@@ -99,31 +99,32 @@ def main():
     logging.info("=" * 60)
     logging.info("开始加载数据...")
 
-    opt.dataset = canonical_dataset_name(opt.dataset)
-    dataset_path = os.path.join('datasets', opt.dataset)
+    dataset_name = canonical_dataset_name(opt.dataset)
+    dataset_path = os.path.join('datasets', dataset_name)
     train_data = pickle.load(open(os.path.join(dataset_path, 'train.txt'), 'rb'))
     test_data = pickle.load(open(os.path.join(dataset_path, 'test.txt'), 'rb'))
     all_train = pickle.load(open(os.path.join(dataset_path, 'all_train_seq.txt'), 'rb'))
 
-    if opt.dataset == 'Tmall':
+    if dataset_name == 'Tmall':
         n_node = 40727
-    elif opt.dataset == 'retailrocket':#最大的 item ID = 36968
+    elif dataset_name == 'retailrocket':#最大的 item ID = 36968
         n_node = 36968
-    elif opt.dataset == 'amazon':
+    elif dataset_name == 'amazon':
         n_node = 18888
-    elif opt.dataset == 'lastfm':#最大的 item ID = 38997
+    elif dataset_name == 'lastfm':#最大的 item ID = 38997
         n_node = 38997
-    elif opt.dataset == 'diginetica':#最大的 item ID = 43097
+    elif dataset_name == 'diginetica':#最大的 item ID = 43097
         n_node =43097
     else:
         n_node = 309
-    logging.info(f"数据集: {opt.dataset}, 节点数: {n_node}")
+    logging.info(f"数据集: {dataset_name}, 节点数: {n_node}")
     comp_sub_config = {
         'max_gap': opt.comp_max_gap,
         'comp_topk': opt.comp_topk,
         'sub_topk': opt.sub_topk,
         'min_support': opt.rel_min_support,
-        'sub_context_min': opt.sub_context_min
+        'sub_context_min': opt.sub_context_min,
+        'conflict_margin': 0.05
     }
 
     train_data = Data(train_data, all_train, shuffle=False, n_node=n_node, comp_sub_config=comp_sub_config)
@@ -160,7 +161,7 @@ def main():
         layers=opt.layer,
         emb_size=opt.embSize,
         batch_size=opt.batchSize,
-        dataset=opt.dataset,
+        dataset=dataset_name,
         K1=opt.K1,
         K2=opt.K2,
         K3=opt.K3,
