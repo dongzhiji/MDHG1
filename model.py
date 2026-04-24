@@ -202,6 +202,7 @@ class MDHG(Module):
         self.base_weight_min = 0.10
         self.base_weight_max = 0.70
         self.comp_sub_pair_hyper_mix = comp_sub_pair_hyper_mix
+        self._position_weight_cache = dict()
         self.init_parameters()
 
     def init_parameters(self):
@@ -283,6 +284,13 @@ class MDHG(Module):
         w_sum = torch.clamp(base_w + comp_w + sub_w, min=self.numerical_eps)
         return base_w / w_sum, comp_w / w_sum, sub_w / w_sum
 
+    def _build_position_weight(self, seq_len, device):
+        device_key = (device.type, device.index if device.type == "cuda" else -1)
+        key = (seq_len, device_key)
+        if key not in self._position_weight_cache:
+            pos_ids = torch.arange(seq_len, device=device).float()
+            self._position_weight_cache[key] = torch.exp(-self.pos_decay * pos_ids).view(1, seq_len, 1)
+        return self._position_weight_cache[key]
 
     def fuzzy_cross_view(self, h1, h2, h3):
         channel_embeddings = [h1, h2, h3]
@@ -332,8 +340,7 @@ class MDHG(Module):
         item_part = item_embedding[reversed_sess_item]
         event_part = event_embedding[reversed_sess_event]
         event_scales = self.event_scale(reversed_sess_event).to(item_embedding.device)
-        pos_ids = torch.arange(seq_len_all, device=item_embedding.device).float()
-        position_weight = torch.exp(-self.pos_decay * pos_ids).view(1, seq_len_all, 1)
+        position_weight = self._build_position_weight(seq_len_all, item_embedding.device)
         seq_h = position_weight * (item_part + event_scales * event_part)
         if session_len.dim() == 1:
             session_len = session_len.unsqueeze(1)
@@ -367,8 +374,7 @@ class MDHG(Module):
         item_part = item_embedding[reversed_sess_item]
         event_part = event_embedding[reversed_sess_event]
         event_scales = self.event_scale(reversed_sess_event).to(item_embedding.device)
-        pos_ids = torch.arange(seq_len_all, device=item_embedding.device).float()
-        position_weight = torch.exp(-self.pos_decay * pos_ids).view(1, seq_len_all, 1)
+        position_weight = self._build_position_weight(seq_len_all, item_embedding.device)
         seq_h = position_weight * (item_part + event_scales * event_part)
         if session_len.dim() == 1:
             session_len = session_len.unsqueeze(1)
@@ -566,7 +572,7 @@ def train_test(model, train_data, test_data, epoch):
 
     model.train()
     for i in tqdm(slices):
-        model.optimizer.zero_grad(set_to_none=True)
+        model.zero_grad()
         with torch.cuda.amp.autocast(enabled=amp_enabled):
             tar, scores_item, con_loss, loss_item, fuzzy_loss = forward(model, i, train_data, epoch, train=True)
             loss = loss_item + con_loss + fuzzy_loss
@@ -580,6 +586,7 @@ def train_test(model, train_data, test_data, epoch):
     print('\tLoss:\t%.3f' % total_loss)
 
     top_K = [5, 10, 20, 50]
+    max_topk = max(top_K)
     metrics = {}
     for K in top_K:
         metrics['hit%d' % K] = []
@@ -594,8 +601,9 @@ def train_test(model, train_data, test_data, epoch):
         for i in tqdm(slices):
             with torch.cuda.amp.autocast(enabled=amp_enabled):
                 tar, scores_item, _, _, _ = forward(model, i, test_data, epoch, train=False)
-            topk_cap = min(50, scores_item.size(1))
-            _, index = torch.topk(scores_item, k=topk_cap, dim=1)
+            # Robust for any dataset where catalog size may be smaller than requested max_topk.
+            effective_topk = min(max_topk, scores_item.size(1))
+            _, index = torch.topk(scores_item, k=effective_topk, dim=1)
             index = trans_to_cpu(index).detach().numpy()
             tar = trans_to_cpu(tar).detach().numpy()
 

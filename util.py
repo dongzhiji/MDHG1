@@ -482,20 +482,18 @@ def data_item_hypergraph_comp_sub(
 
 
 def _session_fingerprint(all_sessions):
-    total_len = 0
+    total_items = 0
     total_nonzero = 0
-    weighted_sum = 0
-    weighted_sq_sum = 0
-    for idx, sess in enumerate(all_sessions):
-        for pos, item in enumerate(sess):
+    digest = hashlib.sha256()
+    for sess in all_sessions:
+        for item in sess:
             val = int(item)
-            total_len += 1
+            total_items += 1
             if val != 0:
                 total_nonzero += 1
-                w = (idx + 1) * (pos + 1)
-                weighted_sum += val * w
-                weighted_sq_sum += (val * val) * (w + 7)
-    return f"{len(all_sessions)}_{total_len}_{total_nonzero}_{weighted_sum % 1000000007}_{weighted_sq_sum % 1000000007}"
+            digest.update(f"{val},".encode("utf-8"))
+        digest.update(b";")
+    return f"{len(all_sessions)}_{total_items}_{total_nonzero}_{digest.hexdigest()[:32]}"
 
 
 def load_or_build_item_hypergraph_comp_sub(
@@ -518,12 +516,17 @@ def load_or_build_item_hypergraph_comp_sub(
             "comp_symmetric": bool(comp_symmetric),
             "session_fp": _session_fingerprint(all_sessions),
         }
-        cache_key = hashlib.md5(json.dumps(cache_meta, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+        cache_key = hashlib.sha256(json.dumps(cache_meta, sort_keys=True).encode("utf-8")).hexdigest()[:32]
         cache_file = os.path.join(cache_dir, f"{cache_prefix}_item_comp_sub_{cache_key}.pkl")
         if os.path.exists(cache_file):
             with open(cache_file, "rb") as f:
                 payload = pickle.load(f)
-            return payload["comp_adj"], payload["sub_adj"], payload["comp_hyper"], payload["sub_hyper"]
+            return (
+                payload["comp_adj"].tocoo(),
+                payload["sub_adj"].tocoo(),
+                payload["comp_hyper"].tocoo(),
+                payload["sub_hyper"].tocoo(),
+            )
 
     comp_adj, sub_adj, comp_hyper, sub_hyper = data_item_hypergraph_comp_sub(
         all_sessions, n_node, max_gap=max_gap, topk=topk, min_neighbors=min_neighbors,

@@ -111,6 +111,7 @@ def main():
     else:
         n_node = 309
     logging.info(f"数据集: {opt.dataset}, 节点数: {n_node}")
+    comp_sub_cache_dir = opt.comp_sub_cache_dir if opt.comp_sub_cache_dir else os.path.join('datasets', opt.dataset, 'graph_cache')
 
     train_data = Data(
         train_data, all_train, shuffle=False, n_node=n_node, comp_max_gap=opt.comp_max_gap,
@@ -119,7 +120,7 @@ def main():
         sub_context_topk=opt.sub_context_topk, sub_context_min=opt.sub_context_min,
         comp_symmetric=bool(opt.comp_symmetric),
         comp_sub_cache=bool(opt.comp_sub_cache),
-        comp_sub_cache_dir=(opt.comp_sub_cache_dir if opt.comp_sub_cache_dir else os.path.join('datasets', opt.dataset, 'graph_cache')),
+        comp_sub_cache_dir=comp_sub_cache_dir,
         cache_prefix=f"{opt.dataset}_train"
     )
     test_data = Data(
@@ -129,7 +130,7 @@ def main():
         sub_context_topk=opt.sub_context_topk, sub_context_min=opt.sub_context_min,
         comp_symmetric=bool(opt.comp_symmetric),
         comp_sub_cache=bool(opt.comp_sub_cache),
-        comp_sub_cache_dir=(opt.comp_sub_cache_dir if opt.comp_sub_cache_dir else os.path.join('datasets', opt.dataset, 'graph_cache')),
+        comp_sub_cache_dir=comp_sub_cache_dir,
         cache_prefix=f"{opt.dataset}_train"
     )
 
