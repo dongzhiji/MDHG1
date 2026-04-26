@@ -63,6 +63,9 @@ parser.add_argument('--sub_head_quantile', type=float, default=0.8, help='head i
 parser.add_argument('--sub_head_scale', type=float, default=1.15, help='threshold scale for substitute head bucket')
 parser.add_argument('--sub_tail_scale', type=float, default=0.85, help='threshold scale for substitute tail bucket')
 parser.add_argument('--comp_sub_decouple_weight', type=float, default=0.02, help='regularization weight for comp/sub embedding decorrelation')
+parser.add_argument('--logit_comp_scale', type=float, default=0.20, help='session-aware comp-logit residual scale')
+parser.add_argument('--logit_sub_scale', type=float, default=0.25, help='session-aware sub-logit residual scale')
+parser.add_argument('--logit_short_sub_boost', type=float, default=0.30, help='short-intent boost on substitute logit residual')
 parser.add_argument('--amp', type=int, default=0, help='deprecated: AMP is disabled and this flag is ignored')
 
 opt = parser.parse_args()
@@ -192,7 +195,10 @@ def main():
         short_intent_max=opt.short_intent_max,
         short_len_factor_min=opt.short_len_factor_min,
         comp_sub_pair_hyper_mix=opt.comp_sub_pair_hyper_mix,
-        comp_sub_decouple_weight=opt.comp_sub_decouple_weight
+        comp_sub_decouple_weight=opt.comp_sub_decouple_weight,
+        logit_comp_scale=opt.logit_comp_scale,
+        logit_sub_scale=opt.logit_sub_scale,
+        logit_short_sub_boost=opt.logit_short_sub_boost
     ))
 
     #reset_parameters(model)
