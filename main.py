@@ -55,6 +55,13 @@ parser.add_argument('--sub_context_min', type=int, default=2, help='minimum cand
 parser.add_argument('--comp_symmetric', type=int, default=1, help='whether complementary relation graph is symmetric (1) or directed (0)')
 parser.add_argument('--comp_sub_cache', type=int, default=1, help='enable cache for item-level comp/sub relation mining')
 parser.add_argument('--comp_sub_cache_dir', default='', help='cache directory for mined comp/sub relation graphs')
+parser.add_argument('--sub_co_buy_suppress', type=float, default=0.6, help='suppression strength for substitute pairs with strong direct co-buy')
+parser.add_argument('--comp_head_quantile', type=float, default=0.8, help='head item frequency quantile for complementary relation bucket threshold')
+parser.add_argument('--comp_head_scale', type=float, default=1.15, help='threshold scale for complementary head bucket')
+parser.add_argument('--comp_tail_scale', type=float, default=0.85, help='threshold scale for complementary tail bucket')
+parser.add_argument('--sub_head_quantile', type=float, default=0.8, help='head item frequency quantile for substitute relation bucket threshold')
+parser.add_argument('--sub_head_scale', type=float, default=1.15, help='threshold scale for substitute head bucket')
+parser.add_argument('--sub_tail_scale', type=float, default=0.85, help='threshold scale for substitute tail bucket')
 parser.add_argument('--amp', type=int, default=0, help='deprecated: AMP is disabled and this flag is ignored')
 
 opt = parser.parse_args()
@@ -121,6 +128,9 @@ def main():
         comp_sub_min_support=opt.comp_sub_min_support, comp_sub_min_norm_weight=opt.comp_sub_min_norm_weight,
         sub_context_topk=opt.sub_context_topk, sub_context_min=opt.sub_context_min,
         comp_symmetric=bool(opt.comp_symmetric),
+        sub_co_buy_suppress=opt.sub_co_buy_suppress,
+        comp_head_quantile=opt.comp_head_quantile, comp_head_scale=opt.comp_head_scale, comp_tail_scale=opt.comp_tail_scale,
+        sub_head_quantile=opt.sub_head_quantile, sub_head_scale=opt.sub_head_scale, sub_tail_scale=opt.sub_tail_scale,
         comp_sub_cache=bool(opt.comp_sub_cache),
         comp_sub_cache_dir=comp_sub_cache_dir,
         cache_prefix=f"{opt.dataset}_train"
@@ -131,6 +141,9 @@ def main():
         comp_sub_min_support=opt.comp_sub_min_support, comp_sub_min_norm_weight=opt.comp_sub_min_norm_weight,
         sub_context_topk=opt.sub_context_topk, sub_context_min=opt.sub_context_min,
         comp_symmetric=bool(opt.comp_symmetric),
+        sub_co_buy_suppress=opt.sub_co_buy_suppress,
+        comp_head_quantile=opt.comp_head_quantile, comp_head_scale=opt.comp_head_scale, comp_tail_scale=opt.comp_tail_scale,
+        sub_head_quantile=opt.sub_head_quantile, sub_head_scale=opt.sub_head_scale, sub_tail_scale=opt.sub_tail_scale,
         comp_sub_cache=bool(opt.comp_sub_cache),
         comp_sub_cache_dir=comp_sub_cache_dir,
         cache_prefix=f"{opt.dataset}_train"

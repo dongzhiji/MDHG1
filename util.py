@@ -1,6 +1,10 @@
 import numpy as np
 from scipy.sparse import coo_matrix
 import warnings
+import os
+import pickle
+import json
+import hashlib
 EPSILON = 1e-8
 
 def fuzzy_membership(x, center=1.0, scale=1.0):
@@ -254,7 +258,8 @@ def _dict_to_coo_with_self_loop(adj, n_node, self_loop=1.0):
     return coo_matrix((data, (row, col)), shape=(n_node, n_node))
 
 
-def _build_anchor_item_hyperedges(rel_adj, n_node, topk=8, min_neighbors=1):
+def _build_anchor_item_hyperedges(
+        rel_adj, n_node, topk=8, min_neighbors=1, anchor_confidence=None, fallback_singleton=True):
     """
     Build item-level hyperedges from anchor-centric relation dict.
 
@@ -280,16 +285,30 @@ def _build_anchor_item_hyperedges(rel_adj, n_node, topk=8, min_neighbors=1):
         if len(sorted_neighbors) < min_neighbors:
             continue
 
+        anchor_conf = 1.0 if anchor_confidence is None else float(np.clip(anchor_confidence.get(anchor, 1.0), 0.05, 2.0))
         max_w = max([w for _, w in sorted_neighbors]) if len(sorted_neighbors) > 0 else 1.0
         row.append(edge_idx)
         col.append(anchor)
-        data.append(1.0)
+        data.append(anchor_conf)
 
         for nb, w in sorted_neighbors:
             row.append(edge_idx)
             col.append(nb)
-            data.append(float(np.clip(w / (max_w + EPSILON), 1e-4, 1.0)))
+            nw = float(np.clip(w / (max_w + EPSILON), 1e-4, 1.0))
+            data.append(float(np.clip(anchor_conf * nw, 1e-4, 2.0)))
         edge_idx += 1
+    if fallback_singleton:
+        covered = set()
+        for r, c in zip(row, col):
+            covered.add(c)
+        for anchor in range(n_node):
+            if anchor in covered:
+                continue
+            row.append(edge_idx)
+            col.append(anchor)
+            anchor_conf = 1.0 if anchor_confidence is None else float(np.clip(anchor_confidence.get(anchor, 1.0), 0.05, 2.0))
+            data.append(anchor_conf)
+            edge_idx += 1
 
     return coo_matrix((data, (row, col)), shape=(edge_idx, n_node))
 
@@ -337,34 +356,51 @@ def _incidence_to_hypergraph_propagation(H, n_node):
     return G
 
 
-def _normalize_relation_graph(rel_adj, item_freq, min_support=1.0, min_norm_weight=0.02):
+def _score_relation_graph(
+        rel_adj, item_freq, min_support=1.0, min_norm_weight=0.02,
+        head_quantile=0.8, head_scale=1.15, tail_scale=0.85):
     normalized = dict()
+    freq_pos = item_freq[item_freq > 0]
+    if freq_pos.size > 0:
+        head_threshold = float(np.quantile(freq_pos, np.clip(head_quantile, 0.0, 1.0)))
+    else:
+        head_threshold = 0.0
+
     for src, dst_dict in rel_adj.items():
         if src < 0 or src >= len(item_freq):
             continue
-        src_freq = item_freq[src]
+        src_freq = float(item_freq[src])
         if src_freq <= 0:
             continue
+        src_bucket_scale = head_scale if src_freq >= head_threshold else tail_scale
+        local_threshold = max(min_norm_weight * src_bucket_scale, 1e-8)
         for dst, weight in dst_dict.items():
             if src == dst or dst < 0 or dst >= len(item_freq):
                 continue
             if weight < min_support:
                 continue
-            dst_freq = item_freq[dst]
+            dst_freq = float(item_freq[dst])
             if dst_freq <= 0:
                 continue
-            norm_w = float(weight / np.sqrt(src_freq * dst_freq + EPSILON))
-            if norm_w < min_norm_weight:
+            # three-stage score = support * normalized strength * confidence
+            support = float(np.log1p(weight))
+            norm_strength = float(weight / np.sqrt(src_freq * dst_freq + EPSILON))
+            confidence = float(weight / (src_freq + EPSILON))
+            score = support * norm_strength * np.sqrt(max(confidence, 0.0) + EPSILON)
+            if score < local_threshold:
                 continue
             if src not in normalized:
                 normalized[src] = dict()
-            normalized[src][dst] = norm_w
+            normalized[src][dst] = score
     return normalized
 
 
 def data_item_hypergraph_comp_sub(
         all_sessions, n_node, max_gap=3, topk=8, min_neighbors=1,
-        min_support=1.0, min_norm_weight=0.02, sub_context_topk=20, sub_context_min=2):
+        min_support=1.0, min_norm_weight=0.02, sub_context_topk=20, sub_context_min=2,
+        comp_symmetric=True, sub_co_buy_suppress=0.6,
+        comp_head_quantile=0.8, comp_head_scale=1.15, comp_tail_scale=0.85,
+        sub_head_quantile=0.8, sub_head_scale=1.15, sub_tail_scale=0.85):
     """
     Build item-view hypergraph relations learned from sessions.
 
@@ -383,6 +419,7 @@ def data_item_hypergraph_comp_sub(
     item_freq = np.zeros(n_node, dtype=np.float32)
     prev_to_next = dict()
     next_to_prev = dict()
+    co_buy_adj = dict()
     dist_weights = [1.0 / d for d in range(1, max_gap + 1)]
 
     def context_pair_weight(count_a, count_b):
@@ -395,6 +432,17 @@ def data_item_hypergraph_comp_sub(
             continue
         for item_id in seq:
             item_freq[item_id] += 1.0
+        uniq = list(dict.fromkeys(seq))
+        for i in range(len(uniq)):
+            a = uniq[i]
+            if a not in co_buy_adj:
+                co_buy_adj[a] = dict()
+            for j in range(i + 1, len(uniq)):
+                b = uniq[j]
+                if b not in co_buy_adj:
+                    co_buy_adj[b] = dict()
+                co_buy_adj[a][b] = co_buy_adj[a].get(b, 0.0) + 1.0
+                co_buy_adj[b][a] = co_buy_adj[b].get(a, 0.0) + 1.0
 
         # complementary: close-by ordered co-occurrence in the same session
         for i in range(len(seq)):
@@ -407,10 +455,11 @@ def data_item_hypergraph_comp_sub(
                 w = dist_weights[j - i - 1]
                 if src not in comp_adj:
                     comp_adj[src] = dict()
-                if dst not in comp_adj:
-                    comp_adj[dst] = dict()
                 comp_adj[src][dst] = comp_adj[src].get(dst, 0.0) + w
-                comp_adj[dst][src] = comp_adj[dst].get(src, 0.0) + w
+                if comp_symmetric:
+                    if dst not in comp_adj:
+                        comp_adj[dst] = dict()
+                    comp_adj[dst][src] = comp_adj[dst].get(src, 0.0) + w
 
         # contexts for substitute learning
         for i in range(len(seq) - 1):
@@ -434,6 +483,19 @@ def data_item_hypergraph_comp_sub(
             sub_adj[i] = dict()
         sub_adj[i][j] = sub_adj[i].get(j, 0.0) + w
 
+    def co_buy_penalty(i, j):
+        if sub_co_buy_suppress <= 0.0:
+            return 1.0
+        co = co_buy_adj.get(i, {}).get(j, 0.0)
+        if co <= 0:
+            return 1.0
+        fi = float(item_freq[i]) if 0 <= i < len(item_freq) else 0.0
+        fj = float(item_freq[j]) if 0 <= j < len(item_freq) else 0.0
+        if fi <= 0.0 or fj <= 0.0:
+            return 1.0
+        norm_co = co / np.sqrt(fi * fj + EPSILON)
+        return 1.0 / (1.0 + sub_co_buy_suppress * norm_co)
+
     # substitute: different items competing under same previous context
     for _, nxt_dict in prev_to_next.items():
         items = sorted(
@@ -446,8 +508,10 @@ def data_item_hypergraph_comp_sub(
             for b in range(a + 1, len(items)):
                 ib, cb = items[b]
                 w = context_pair_weight(ca, cb)
-                add_sub_pair(ia, ib, w)
-                add_sub_pair(ib, ia, w)
+                p_ab = co_buy_penalty(ia, ib)
+                p_ba = co_buy_penalty(ib, ia)
+                add_sub_pair(ia, ib, w * p_ab)
+                add_sub_pair(ib, ia, w * p_ba)
 
     # substitute: different items leading to same next context
     for _, prv_dict in next_to_prev.items():
@@ -461,15 +525,38 @@ def data_item_hypergraph_comp_sub(
             for b in range(a + 1, len(items)):
                 ib, cb = items[b]
                 w = context_pair_weight(ca, cb)
-                add_sub_pair(ia, ib, w)
-                add_sub_pair(ib, ia, w)
+                p_ab = co_buy_penalty(ia, ib)
+                p_ba = co_buy_penalty(ib, ia)
+                add_sub_pair(ia, ib, w * p_ab)
+                add_sub_pair(ib, ia, w * p_ba)
 
-    comp_adj = _normalize_relation_graph(comp_adj, item_freq, min_support=min_support, min_norm_weight=min_norm_weight)
-    sub_adj = _normalize_relation_graph(sub_adj, item_freq, min_support=min_support, min_norm_weight=min_norm_weight)
+    comp_adj = _score_relation_graph(
+        comp_adj, item_freq, min_support=min_support, min_norm_weight=min_norm_weight,
+        head_quantile=comp_head_quantile, head_scale=comp_head_scale, tail_scale=comp_tail_scale
+    )
+    sub_adj = _score_relation_graph(
+        sub_adj, item_freq, min_support=min_support, min_norm_weight=min_norm_weight,
+        head_quantile=sub_head_quantile, head_scale=sub_head_scale, tail_scale=sub_tail_scale
+    )
+
+    comp_anchor_conf = {}
+    sub_anchor_conf = {}
+    max_item_freq = float(np.max(item_freq)) if np.max(item_freq) > 0 else 1.0
+    for i in range(n_node):
+        freq_conf = float(np.log1p(item_freq[i]) / np.log1p(max_item_freq + EPSILON))
+        comp_rel = float(np.log1p(sum(comp_adj.get(i, {}).values())))
+        sub_rel = float(np.log1p(sum(sub_adj.get(i, {}).values())))
+        comp_anchor_conf[i] = float(np.clip(0.7 * freq_conf + 0.3 * np.tanh(comp_rel), 0.05, 1.5))
+        sub_anchor_conf[i] = float(np.clip(0.7 * freq_conf + 0.3 * np.tanh(sub_rel), 0.05, 1.5))
+
     comp = _dict_to_coo_with_self_loop(comp_adj, n_node, self_loop=1.0)
     sub = _dict_to_coo_with_self_loop(sub_adj, n_node, self_loop=1.0)
-    comp_H = _build_anchor_item_hyperedges(comp_adj, n_node, topk=topk, min_neighbors=min_neighbors)
-    sub_H = _build_anchor_item_hyperedges(sub_adj, n_node, topk=topk, min_neighbors=min_neighbors)
+    comp_H = _build_anchor_item_hyperedges(
+        comp_adj, n_node, topk=topk, min_neighbors=min_neighbors, anchor_confidence=comp_anchor_conf, fallback_singleton=True
+    )
+    sub_H = _build_anchor_item_hyperedges(
+        sub_adj, n_node, topk=topk, min_neighbors=min_neighbors, anchor_confidence=sub_anchor_conf, fallback_singleton=True
+    )
     comp_hyper = _incidence_to_hypergraph_propagation(comp_H, n_node)
     sub_hyper = _incidence_to_hypergraph_propagation(sub_H, n_node)
     return comp, sub, comp_hyper, sub_hyper
@@ -478,7 +565,10 @@ class Data():
     def __init__(
             self, data, all_train, shuffle=False, n_node=None, comp_max_gap=3, comp_sub_topk=8,
             comp_sub_min_neighbors=1, comp_sub_min_support=1.0, comp_sub_min_norm_weight=0.02,
-            sub_context_topk=20, sub_context_min=2):
+            sub_context_topk=20, sub_context_min=2, comp_symmetric=True,
+            sub_co_buy_suppress=0.6, comp_head_quantile=0.8, comp_head_scale=1.15, comp_tail_scale=0.85,
+            sub_head_quantile=0.8, sub_head_scale=1.15, sub_tail_scale=0.85,
+            comp_sub_cache=True, comp_sub_cache_dir='', cache_prefix=''):
         if isinstance(data, tuple):
             data = list(data)
         if len(data) == 2:
@@ -504,12 +594,50 @@ class Data():
             adj_fuzzy = data_masks_fuzzy(all_train_items, n_node, all_events=all_train_events)
             R_fuzzy = data_R_fuzzy(all_train_items, n_node, all_events=all_train_events)
             R1_fuzzy = data_R1_fuzzy(all_train_items, n_node, all_events=all_train_events)
-            comp_adj, sub_adj, comp_hyper, sub_hyper = data_item_hypergraph_comp_sub(
-                all_train_items, n_node, max_gap=comp_max_gap, topk=comp_sub_topk,
-                min_neighbors=comp_sub_min_neighbors, min_support=comp_sub_min_support,
-                min_norm_weight=comp_sub_min_norm_weight, sub_context_topk=sub_context_topk,
-                sub_context_min=sub_context_min
-            )
+            graph_cfg = {
+                'max_gap': comp_max_gap,
+                'topk': comp_sub_topk,
+                'min_neighbors': comp_sub_min_neighbors,
+                'min_support': comp_sub_min_support,
+                'min_norm_weight': comp_sub_min_norm_weight,
+                'sub_context_topk': sub_context_topk,
+                'sub_context_min': sub_context_min,
+                'comp_symmetric': bool(comp_symmetric),
+                'sub_co_buy_suppress': sub_co_buy_suppress,
+                'comp_head_quantile': comp_head_quantile,
+                'comp_head_scale': comp_head_scale,
+                'comp_tail_scale': comp_tail_scale,
+                'sub_head_quantile': sub_head_quantile,
+                'sub_head_scale': sub_head_scale,
+                'sub_tail_scale': sub_tail_scale
+            }
+
+            comp_adj = sub_adj = comp_hyper = sub_hyper = None
+            cache_loaded = False
+            if comp_sub_cache:
+                try:
+                    cache_dir = comp_sub_cache_dir if comp_sub_cache_dir else os.path.join('datasets', 'graph_cache')
+                    os.makedirs(cache_dir, exist_ok=True)
+                    prefix = cache_prefix if cache_prefix else 'graph'
+                    sig = hashlib.md5(json.dumps({'n_node': n_node, **graph_cfg}, sort_keys=True).encode('utf-8')).hexdigest()[:12]
+                    cache_file = os.path.join(cache_dir, f'{prefix}_comp_sub_{sig}.pkl')
+                    if os.path.exists(cache_file):
+                        with open(cache_file, 'rb') as f:
+                            comp_adj, sub_adj, comp_hyper, sub_hyper = pickle.load(f)
+                        cache_loaded = True
+                except Exception:
+                    cache_loaded = False
+
+            if not cache_loaded:
+                comp_adj, sub_adj, comp_hyper, sub_hyper = data_item_hypergraph_comp_sub(
+                    all_train_items, n_node, **graph_cfg
+                )
+                if comp_sub_cache:
+                    try:
+                        with open(cache_file, 'wb') as f:
+                            pickle.dump((comp_adj, sub_adj, comp_hyper, sub_hyper), f, protocol=pickle.HIGHEST_PROTOCOL)
+                    except Exception:
+                        pass
             self.adjacency = adj.multiply(1.0 / (adj.sum(axis=0).reshape(1, -1) + 1e-8))
             self.adjacency_T = self.adjacency.T
             self.adjacency1 = R1.multiply(1.0 / (R1.sum(axis=0).reshape(1, -1) + 1e-8))

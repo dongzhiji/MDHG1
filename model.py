@@ -211,6 +211,7 @@ class MDHG(Module):
         self.base_weight_min = 0.10
         self.base_weight_max = 0.70
         self.comp_sub_pair_hyper_mix = comp_sub_pair_hyper_mix
+        self.comp_sub_decouple_weight = 0.02
         self._position_weight_cache = dict()
         self.init_parameters()
 
@@ -274,14 +275,22 @@ class MDHG(Module):
         scale = torch.clamp(prior.abs().mean(), min=self.numerical_eps)
         return prior / scale
 
-    def compute_comp_sub_weights(self, repeat_ratio):
+    def compute_comp_sub_weights(self, repeat_ratio, session_len=None, event_strength=None):
+        if session_len is None:
+            session_len = torch.ones_like(repeat_ratio) * 3.0
+        if event_strength is None:
+            event_strength = torch.ones_like(repeat_ratio) * 0.5
+        short_factor = torch.clamp(1.0 / torch.sqrt(session_len.float().clamp(min=1.0)), min=0.2, max=1.0)
+        event_factor = torch.clamp(event_strength.float(), min=0.0, max=2.0)
+        comp_adapt = torch.clamp(1.0 + 0.15 * event_factor - 0.10 * short_factor, min=0.85, max=1.25)
+        sub_adapt = torch.clamp(1.0 + 0.35 * short_factor + 0.08 * repeat_ratio, min=0.90, max=1.45)
         comp_w = torch.clamp(
-            self.comp_weight_base - self.comp_weight_decay * repeat_ratio,
+            (self.comp_weight_base - self.comp_weight_decay * repeat_ratio) * comp_adapt,
             min=self.comp_weight_min,
             max=self.comp_weight_max
         )
         sub_w = torch.clamp(
-            self.sub_weight_base + self.sub_weight_gain * repeat_ratio,
+            (self.sub_weight_base + self.sub_weight_gain * repeat_ratio) * sub_adapt,
             min=self.sub_weight_min,
             max=self.sub_weight_max
         )
@@ -448,6 +457,8 @@ class MDHG(Module):
     def forward(self, session_item, session_len, reversed_sess_item, reversed_sess_event, mask, epoch, tar, train):
         repeat_ratio = self.calc_repeat_ratio_batch(session_item)
         fuzzy_strength = (0.20 + 0.45 * torch.clamp(repeat_ratio / 0.3, max=1.0)).unsqueeze(1)
+        sess_len_vec = session_len.float().squeeze(-1).clamp(min=1.0)
+        event_strength_vec = self.event_scale(reversed_sess_event).squeeze(-1).mean(dim=1)
         event_weight = self.event_embedding.weight
         i1, _ = self.ItemGraph(self.adj1_fuzzy, self.adjacency_fuzzy, self.embedding1.weight, 0)
         i2, _ = self.ItemGraph(self.adj2_fuzzy, self.adjacency_T_fuzzy, self.embedding2.weight, 1)
@@ -463,12 +474,15 @@ class MDHG(Module):
         mean_hyperedge_activation = hyperedge_act.mean()
         item_hyper_prior_norm = self.normalize_item_prior(self.R_fuzzy)
         i3 = mean_hyperedge_activation * i3_fuzzy + (1.0 - mean_hyperedge_activation) * i3_base
-        # item-level uses batch mean repeat ratio for stable global relation fusion
-        base_weight, comp_weight, sub_weight = self.compute_comp_sub_weights(repeat_ratio.mean())
+        # item-level relation blend uses batch-aggregated session-aware gate
+        base_weight, comp_weight, sub_weight = self.compute_comp_sub_weights(
+            repeat_ratio.mean(), sess_len_vec.mean(), event_strength_vec.mean()
+        )
         i3 = base_weight * i3 + comp_weight * i_comp + sub_weight * i_sub
         i3 = i3 * ((1.0 - self.item_prior_mix) + self.item_prior_mix * item_hyper_prior_norm.unsqueeze(1))
         i1, i2, i3 = F.normalize(i1, dim=-1), F.normalize(i2, dim=-1), F.normalize(i3, dim=-1)
         item_mix, _ = self.fuzzy_cross_view(i1, i2, i3)
+        comp_sub_decouple_loss = (F.normalize(i_comp, dim=-1) * F.normalize(i_sub, dim=-1)).sum(dim=1).pow(2).mean()
 
         if self.dataset == 'Tmall':
             s1 = self.generate_sess_emb_npos(i1, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
@@ -487,7 +501,7 @@ class MDHG(Module):
 
         s3 = hyperedge_act.unsqueeze(1) * s3_fuzzy + (1.0 - hyperedge_act.unsqueeze(1)) * s3_base
         # session-level uses per-session repeat ratio for personalized relation fusion
-        base_w, comp_w, sub_w = self.compute_comp_sub_weights(repeat_ratio)
+        base_w, comp_w, sub_w = self.compute_comp_sub_weights(repeat_ratio, sess_len_vec, event_strength_vec)
         base_w, comp_w, sub_w = base_w.unsqueeze(1), comp_w.unsqueeze(1), sub_w.unsqueeze(1)
         s3 = base_w * s3 + comp_w * s_comp + sub_w * s_sub
 
@@ -539,6 +553,8 @@ class MDHG(Module):
         else:
             intent_align_loss = torch.tensor(0.0, device=scores_item.device)
         loss_item = ce_loss + self.bpr_loss_weight * bpr_loss + self.intent_align_weight * intent_align_loss
+        if train:
+            loss_item = loss_item + self.comp_sub_decouple_weight * comp_sub_decouple_loss
         con_loss = torch.tensor(0.0, device=scores_item.device)
 
         if train:
