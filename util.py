@@ -6,6 +6,11 @@ import pickle
 import json
 import hashlib
 EPSILON = 1e-8
+ANCHOR_CONF_DEFAULT = 1.0
+ANCHOR_CONF_MIN = 0.05
+ANCHOR_CONF_MAX = 2.0
+ANCHOR_MIX_FREQ = 0.7
+ANCHOR_MIX_REL = 0.3
 
 def fuzzy_membership(x, center=1.0, scale=1.0):
     return float(np.exp(-abs(x - center) / max(scale, 1e-8)))
@@ -285,7 +290,9 @@ def _build_anchor_item_hyperedges(
         if len(sorted_neighbors) < min_neighbors:
             continue
 
-        anchor_conf = 1.0 if anchor_confidence is None else float(np.clip(anchor_confidence.get(anchor, 1.0), 0.05, 2.0))
+        anchor_conf = ANCHOR_CONF_DEFAULT if anchor_confidence is None else float(
+            np.clip(anchor_confidence.get(anchor, ANCHOR_CONF_DEFAULT), ANCHOR_CONF_MIN, ANCHOR_CONF_MAX)
+        )
         max_w = max([w for _, w in sorted_neighbors]) if len(sorted_neighbors) > 0 else 1.0
         row.append(edge_idx)
         col.append(anchor)
@@ -295,7 +302,7 @@ def _build_anchor_item_hyperedges(
             row.append(edge_idx)
             col.append(nb)
             nw = float(np.clip(w / (max_w + EPSILON), 1e-4, 1.0))
-            data.append(float(np.clip(anchor_conf * nw, 1e-4, 2.0)))
+            data.append(float(np.clip(anchor_conf * nw, 1e-4, ANCHOR_CONF_MAX)))
         edge_idx += 1
     if fallback_singleton:
         covered = set()
@@ -306,7 +313,9 @@ def _build_anchor_item_hyperedges(
                 continue
             row.append(edge_idx)
             col.append(anchor)
-            anchor_conf = 1.0 if anchor_confidence is None else float(np.clip(anchor_confidence.get(anchor, 1.0), 0.05, 2.0))
+            anchor_conf = ANCHOR_CONF_DEFAULT if anchor_confidence is None else float(
+                np.clip(anchor_confidence.get(anchor, ANCHOR_CONF_DEFAULT), ANCHOR_CONF_MIN, ANCHOR_CONF_MAX)
+            )
             data.append(anchor_conf)
             edge_idx += 1
 
@@ -356,13 +365,21 @@ def _incidence_to_hypergraph_propagation(H, n_node):
     return G
 
 
+def _pair_norm_strength(weight, src_freq, dst_freq):
+    return float(weight / np.sqrt(src_freq * dst_freq + EPSILON))
+
+
 def _score_relation_graph(
         rel_adj, item_freq, min_support=1.0, min_norm_weight=0.02,
         head_quantile=0.8, head_scale=1.15, tail_scale=0.85):
+    if head_quantile < 0.0 or head_quantile > 1.0:
+        raise ValueError(f"head_quantile must be in [0,1], got {head_quantile}")
+    if head_scale <= 0.0 or tail_scale <= 0.0:
+        raise ValueError(f"head_scale and tail_scale must be > 0, got {head_scale}, {tail_scale}")
     normalized = dict()
     freq_pos = item_freq[item_freq > 0]
     if freq_pos.size > 0:
-        head_threshold = float(np.quantile(freq_pos, np.clip(head_quantile, 0.0, 1.0)))
+        head_threshold = float(np.quantile(freq_pos, head_quantile))
     else:
         head_threshold = 0.0
 
@@ -384,8 +401,10 @@ def _score_relation_graph(
                 continue
             # three-stage score = support * normalized strength * confidence
             support = float(np.log1p(weight))
-            norm_strength = float(weight / np.sqrt(src_freq * dst_freq + EPSILON))
+            norm_strength = _pair_norm_strength(weight, src_freq, dst_freq)
             confidence = float(weight / (src_freq + EPSILON))
+            # support captures relation evidence quantity; norm_strength removes popularity bias;
+            # confidence captures directional likelihood p(dst|src).
             score = support * norm_strength * np.sqrt(max(confidence, 0.0) + EPSILON)
             if score < local_threshold:
                 continue
@@ -493,7 +512,7 @@ def data_item_hypergraph_comp_sub(
         fj = float(item_freq[j]) if 0 <= j < len(item_freq) else 0.0
         if fi <= 0.0 or fj <= 0.0:
             return 1.0
-        norm_co = co / np.sqrt(fi * fj + EPSILON)
+        norm_co = _pair_norm_strength(co, fi, fj)
         return 1.0 / (1.0 + sub_co_buy_suppress * norm_co)
 
     # substitute: different items competing under same previous context
@@ -546,8 +565,8 @@ def data_item_hypergraph_comp_sub(
         freq_conf = float(np.log1p(item_freq[i]) / np.log1p(max_item_freq + EPSILON))
         comp_rel = float(np.log1p(sum(comp_adj.get(i, {}).values())))
         sub_rel = float(np.log1p(sum(sub_adj.get(i, {}).values())))
-        comp_anchor_conf[i] = float(np.clip(0.7 * freq_conf + 0.3 * np.tanh(comp_rel), 0.05, 1.5))
-        sub_anchor_conf[i] = float(np.clip(0.7 * freq_conf + 0.3 * np.tanh(sub_rel), 0.05, 1.5))
+        comp_anchor_conf[i] = float(np.clip(ANCHOR_MIX_FREQ * freq_conf + ANCHOR_MIX_REL * np.tanh(comp_rel), ANCHOR_CONF_MIN, ANCHOR_CONF_MAX))
+        sub_anchor_conf[i] = float(np.clip(ANCHOR_MIX_FREQ * freq_conf + ANCHOR_MIX_REL * np.tanh(sub_rel), ANCHOR_CONF_MIN, ANCHOR_CONF_MAX))
 
     comp = _dict_to_coo_with_self_loop(comp_adj, n_node, self_loop=1.0)
     sub = _dict_to_coo_with_self_loop(sub_adj, n_node, self_loop=1.0)
@@ -619,14 +638,15 @@ class Data():
                     cache_dir = comp_sub_cache_dir if comp_sub_cache_dir else os.path.join('datasets', 'graph_cache')
                     os.makedirs(cache_dir, exist_ok=True)
                     prefix = cache_prefix if cache_prefix else 'graph'
-                    sig = hashlib.md5(json.dumps({'n_node': n_node, **graph_cfg}, sort_keys=True).encode('utf-8')).hexdigest()[:12]
+                    sig = hashlib.sha256(json.dumps({'n_node': n_node, **graph_cfg}, sort_keys=True).encode('utf-8')).hexdigest()[:32]
                     cache_file = os.path.join(cache_dir, f'{prefix}_comp_sub_{sig}.pkl')
                     if os.path.exists(cache_file):
                         with open(cache_file, 'rb') as f:
                             comp_adj, sub_adj, comp_hyper, sub_hyper = pickle.load(f)
                         cache_loaded = True
-                except Exception:
+                except (OSError, pickle.UnpicklingError, EOFError, ValueError):
                     cache_loaded = False
+                    warnings.warn("Failed to load comp/sub cache, falling back to online mining.", RuntimeWarning)
 
             if not cache_loaded:
                 comp_adj, sub_adj, comp_hyper, sub_hyper = data_item_hypergraph_comp_sub(
@@ -636,8 +656,8 @@ class Data():
                     try:
                         with open(cache_file, 'wb') as f:
                             pickle.dump((comp_adj, sub_adj, comp_hyper, sub_hyper), f, protocol=pickle.HIGHEST_PROTOCOL)
-                    except Exception:
-                        pass
+                    except (OSError, pickle.PicklingError):
+                        warnings.warn("Failed to write comp/sub cache.", RuntimeWarning)
             self.adjacency = adj.multiply(1.0 / (adj.sum(axis=0).reshape(1, -1) + 1e-8))
             self.adjacency_T = self.adjacency.T
             self.adjacency1 = R1.multiply(1.0 / (R1.sum(axis=0).reshape(1, -1) + 1e-8))

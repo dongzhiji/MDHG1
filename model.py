@@ -103,7 +103,7 @@ class MDHG(Module):
                  n_node, lr, layers, l2, beta, lam, eps, dataset,
                  K1, K2, K3, dropout, alpha, emb_size=100, batch_size=100,
                  intent_align_weight=0.03, short_intent_min=0.10, short_intent_max=0.45,
-                 short_len_factor_min=0.35, comp_sub_pair_hyper_mix=0.5):
+                 short_len_factor_min=0.35, comp_sub_pair_hyper_mix=0.5, comp_sub_decouple_weight=0.02):
         super(MDHG, self).__init__()
         self.emb_size = emb_size
         self.batch_size = batch_size
@@ -211,7 +211,7 @@ class MDHG(Module):
         self.base_weight_min = 0.10
         self.base_weight_max = 0.70
         self.comp_sub_pair_hyper_mix = comp_sub_pair_hyper_mix
-        self.comp_sub_decouple_weight = 0.02
+        self.comp_sub_decouple_weight = comp_sub_decouple_weight
         self._position_weight_cache = dict()
         self.init_parameters()
 
@@ -482,6 +482,7 @@ class MDHG(Module):
         i3 = i3 * ((1.0 - self.item_prior_mix) + self.item_prior_mix * item_hyper_prior_norm.unsqueeze(1))
         i1, i2, i3 = F.normalize(i1, dim=-1), F.normalize(i2, dim=-1), F.normalize(i3, dim=-1)
         item_mix, _ = self.fuzzy_cross_view(i1, i2, i3)
+        # Penalize comp/sub channel correlation so complementary and substitute semantics remain disentangled.
         comp_sub_decouple_loss = (F.normalize(i_comp, dim=-1) * F.normalize(i_sub, dim=-1)).sum(dim=1).pow(2).mean()
 
         if self.dataset == 'Tmall':
