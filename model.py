@@ -5,7 +5,6 @@ import torch
 from torch import nn
 from torch.nn import Module
 import torch.nn.functional as F
-from numba import jit
 from tqdm import tqdm
 
 def trans_to_cuda(variable):
@@ -13,6 +12,15 @@ def trans_to_cuda(variable):
 
 def trans_to_cpu(variable):
     return variable.cpu() if torch.cuda.is_available() else variable
+
+
+def safe_sparse_mm(adjacency, dense):
+    """
+    Sparse-dense matmul with stable dtype boundaries:
+    sparse matmul runs in float32, output is cast back to dense dtype.
+    """
+    out = torch.sparse.mm(adjacency, dense.float())
+    return out.to(dense.dtype) if out.dtype != dense.dtype else out
 
 
 class ItemConv(Module):
@@ -47,7 +55,7 @@ class ItemConv(Module):
         finalh = []
         for i in range(self.layers):
             item_embeddings = self.w_item[f'weight_item{i}'](item_embeddings)
-            item_embeddings = torch.sparse.mm(adjacency, item_embeddings)
+            item_embeddings = safe_sparse_mm(adjacency, item_embeddings)
 
             H1 = self.w_i1[f'weight_item{channel}'](item_embeddings) + item_embeddings
             H1 = self.relu(H1)
@@ -81,7 +89,7 @@ class HyperGraphConv(Module):
         outs = [F.normalize(x, dim=-1, p=2)]
         for l in range(self.layers):
             x = self.linears[l](x)
-            x = torch.sparse.mm(hyper_propagation, x)
+            x = safe_sparse_mm(hyper_propagation, x)
             x = F.relu(x)
             x = self.dropout(x)
             outs.append(F.normalize(x, dim=-1, p=2))
@@ -103,6 +111,7 @@ class MDHG(Module):
         self.dataset = dataset
         self.lr = lr
         self.layers = layers
+        self.use_amp = False
         self.w_k = 10
         self.numerical_eps = 1e-8
         self.adjacency = trans_to_cuda(self.trans_adj(adjacency))
@@ -202,6 +211,7 @@ class MDHG(Module):
         self.base_weight_min = 0.10
         self.base_weight_max = 0.70
         self.comp_sub_pair_hyper_mix = comp_sub_pair_hyper_mix
+        self._position_weight_cache = dict()
         self.init_parameters()
 
     def init_parameters(self):
@@ -283,6 +293,13 @@ class MDHG(Module):
         w_sum = torch.clamp(base_w + comp_w + sub_w, min=self.numerical_eps)
         return base_w / w_sum, comp_w / w_sum, sub_w / w_sum
 
+    def _build_position_weight(self, seq_len, device):
+        device_key = (device.type, device.index if device.type == "cuda" else -1)
+        key = (seq_len, device_key)
+        if key not in self._position_weight_cache:
+            pos_ids = torch.arange(seq_len, device=device).float()
+            self._position_weight_cache[key] = torch.exp(-self.pos_decay * pos_ids).view(1, seq_len, 1)
+        return self._position_weight_cache[key]
 
     def fuzzy_cross_view(self, h1, h2, h3):
         channel_embeddings = [h1, h2, h3]
@@ -329,15 +346,11 @@ class MDHG(Module):
         event_embedding = torch.cat([zeros, event_embedding], 0)
         batch_size = session_item.shape[0]
         seq_len_all = list(reversed_sess_item.shape)[1]
-        seq_h = torch.zeros(batch_size, seq_len_all, self.emb_size, device=item_embedding.device)
-        for i in range(batch_size):
-            item_part = item_embedding[reversed_sess_item[i]]
-            event_part = event_embedding[reversed_sess_event[i]]
-            event_scales = self.event_scale(reversed_sess_event[i]).to(item_embedding.device)
-            seq_len = item_part.shape[0]
-            pos_ids = torch.arange(seq_len, device=item_part.device).float()
-            position_weight = torch.exp(-self.pos_decay * pos_ids).unsqueeze(-1)
-            seq_h[i] = position_weight * (item_part + event_scales * event_part)
+        item_part = item_embedding[reversed_sess_item]
+        event_part = event_embedding[reversed_sess_event]
+        event_scales = self.event_scale(reversed_sess_event).to(item_embedding.device)
+        position_weight = self._build_position_weight(seq_len_all, item_embedding.device)
+        seq_h = position_weight * (item_part + event_scales * event_part)
         if session_len.dim() == 1:
             session_len = session_len.unsqueeze(1)
         hs = torch.sum(seq_h, 1) / (session_len.float() + 1e-8)
@@ -367,15 +380,11 @@ class MDHG(Module):
         event_embedding = torch.cat([zeros, event_embedding], 0)
         batch_size = session_item.shape[0]
         seq_len_all = list(reversed_sess_item.shape)[1]
-        seq_h = torch.zeros(batch_size, seq_len_all, self.emb_size, device=item_embedding.device)
-        for i in range(batch_size):
-            item_part = item_embedding[reversed_sess_item[i]]
-            event_part = event_embedding[reversed_sess_event[i]]
-            event_scales = self.event_scale(reversed_sess_event[i]).to(item_embedding.device)
-            seq_len = item_part.shape[0]
-            pos_ids = torch.arange(seq_len, device=item_part.device).float()
-            position_weight = torch.exp(-self.pos_decay * pos_ids).unsqueeze(-1)
-            seq_h[i] = position_weight * (item_part + event_scales * event_part)
+        item_part = item_embedding[reversed_sess_item]
+        event_part = event_embedding[reversed_sess_event]
+        event_scales = self.event_scale(reversed_sess_event).to(item_embedding.device)
+        position_weight = self._build_position_weight(seq_len_all, item_embedding.device)
+        seq_h = position_weight * (item_part + event_scales * event_part)
         if session_len.dim() == 1:
             session_len = session_len.unsqueeze(1)
         hs = torch.sum(seq_h, 1) / (session_len.float() + 1e-8)
@@ -563,55 +572,30 @@ def forward(model, i, data, epoch, train):
     return tar, scores_item, con_loss, loss_item, fuzzy_loss
 
 
-@jit(nopython=True)
-def find_k_largest(K, candidates):
-    n_candidates = []
-    for iid, score in enumerate(candidates[:K]):
-        n_candidates.append((iid, score))
-    n_candidates.sort(key=lambda d: d[1], reverse=True)
-    k_largest_scores = [item[1] for item in n_candidates]
-    ids = [item[0] for item in n_candidates]
-    for iid, score in enumerate(candidates):
-        ind = K
-        l = 0
-        r = K - 1
-        if k_largest_scores[r] < score:
-            while r >= l:
-                mid = int((r - l) / 2) + l
-                if k_largest_scores[mid] >= score:
-                    l = mid + 1
-                else:
-                    r = mid - 1
-                if r < l:
-                    ind = r
-                    break
-        if ind < K - 2:
-            k_largest_scores[ind + 2:] = k_largest_scores[ind + 1:-1]
-            ids[ind + 2:] = ids[ind + 1:-1]
-        if ind < K - 1:
-            k_largest_scores[ind + 1] = score
-            ids[ind + 1] = iid
-    return ids
-
-
 def train_test(model, train_data, test_data, epoch):
     print('start training: ', datetime.datetime.now())
     total_loss = 0.0
     slices = train_data.generate_batch(model.batch_size)
+    amp_enabled = model.use_amp
+    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
 
     model.train()
     for i in tqdm(slices):
         model.zero_grad()
-        tar, scores_item, con_loss, loss_item, fuzzy_loss = forward(model, i, train_data, epoch, train=True)
-        loss = loss_item + con_loss + fuzzy_loss
-        loss.backward()
+        with torch.cuda.amp.autocast(enabled=amp_enabled):
+            tar, scores_item, con_loss, loss_item, fuzzy_loss = forward(model, i, train_data, epoch, train=True)
+            loss = loss_item + con_loss + fuzzy_loss
+        scaler.scale(loss).backward()
+        scaler.unscale_(model.optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
-        model.optimizer.step()
+        scaler.step(model.optimizer)
+        scaler.update()
         total_loss += loss.item()
 
     print('\tLoss:\t%.3f' % total_loss)
 
     top_K = [5, 10, 20, 50]
+    max_topk = max(top_K)
     metrics = {}
     for K in top_K:
         metrics['hit%d' % K] = []
@@ -624,12 +608,12 @@ def train_test(model, train_data, test_data, epoch):
 
     with torch.no_grad():
         for i in tqdm(slices):
-            tar, scores_item, _, _, _ = forward(model, i, test_data, epoch, train=False)
-            scores = trans_to_cpu(scores_item).detach().numpy()
-            index = []
-            for idd in range(scores.shape[0]):
-                index.append(find_k_largest(50, scores[idd]))
-            index = np.array(index)
+            with torch.cuda.amp.autocast(enabled=amp_enabled):
+                tar, scores_item, _, _, _ = forward(model, i, test_data, epoch, train=False)
+            # Robust for any dataset where catalog size may be smaller than requested max_topk.
+            effective_topk = min(max_topk, scores_item.size(1))
+            _, index = torch.topk(scores_item, k=effective_topk, dim=1)
+            index = trans_to_cpu(index).detach().numpy()
             tar = trans_to_cpu(tar).detach().numpy()
 
             for K in top_K:
