@@ -104,7 +104,10 @@ class MDHG(Module):
                  K1, K2, K3, dropout, alpha, emb_size=100, batch_size=100,
                  intent_align_weight=0.03, short_intent_min=0.10, short_intent_max=0.45,
                  short_len_factor_min=0.35, comp_sub_pair_hyper_mix=0.5, comp_sub_decouple_weight=0.02,
-                 logit_comp_scale=0.20, logit_sub_scale=0.25, logit_short_sub_boost=0.30):
+                 logit_comp_scale=0.20, logit_sub_scale=0.25, logit_short_sub_boost=0.30,
+                 comp_sub_warmup_epochs=1, comp_sub_ramp_epochs=4,
+                 rel_conf_comp_scale=1.0, rel_conf_sub_scale=1.0,
+                 rel_conf_event_gain=0.20, rel_conf_repeat_penalty=0.25, rel_conf_len_gain=0.15):
         super(MDHG, self).__init__()
         self.emb_size = emb_size
         self.batch_size = batch_size
@@ -217,6 +220,13 @@ class MDHG(Module):
         self.logit_sub_scale = logit_sub_scale
         self.logit_short_sub_boost = logit_short_sub_boost
         self.sub_logit_gate_max = 1.2
+        self.comp_sub_warmup_epochs = max(0, int(comp_sub_warmup_epochs))
+        self.comp_sub_ramp_epochs = max(1, int(comp_sub_ramp_epochs))
+        self.rel_conf_comp_scale = rel_conf_comp_scale
+        self.rel_conf_sub_scale = rel_conf_sub_scale
+        self.rel_conf_event_gain = rel_conf_event_gain
+        self.rel_conf_repeat_penalty = rel_conf_repeat_penalty
+        self.rel_conf_len_gain = rel_conf_len_gain
         self._position_weight_cache = dict()
         self.init_parameters()
 
@@ -459,11 +469,34 @@ class MDHG(Module):
         factor = min((epoch - self.warmup_epochs + 1) / span, 1.0)
         return self.max_fuzzy_factor * factor
 
+    def relation_branch_schedule(self, epoch):
+        if epoch < self.comp_sub_warmup_epochs:
+            return 0.0
+        return min((epoch - self.comp_sub_warmup_epochs + 1) / float(self.comp_sub_ramp_epochs), 1.0)
+
+    def relation_reliability(self, repeat_ratio, session_len, event_strength):
+        repeat_ratio = torch.clamp(repeat_ratio.float(), min=0.0, max=1.0)
+        session_len = torch.clamp(session_len.float(), min=1.0)
+        event_strength = torch.clamp(event_strength.float(), min=0.0, max=2.0)
+        short_factor = torch.clamp(1.0 / torch.sqrt(session_len), min=0.2, max=1.0)
+        long_factor = 1.0 - short_factor
+        comp_logit = self.rel_conf_comp_scale * (
+            self.rel_conf_event_gain * event_strength + self.rel_conf_len_gain * long_factor - self.rel_conf_repeat_penalty * repeat_ratio
+        )
+        sub_logit = self.rel_conf_sub_scale * (
+            0.35 * short_factor + 0.45 * repeat_ratio + 0.20 * event_strength - 0.20
+        )
+        comp_rel = torch.clamp(torch.sigmoid(comp_logit), min=0.05, max=1.0)
+        sub_rel = torch.clamp(torch.sigmoid(sub_logit), min=0.05, max=1.0)
+        return comp_rel, sub_rel
+
     def forward(self, session_item, session_len, reversed_sess_item, reversed_sess_event, mask, epoch, tar, train):
         repeat_ratio = self.calc_repeat_ratio_batch(session_item)
+        relation_progress = self.relation_branch_schedule(epoch)
         fuzzy_strength = (0.20 + 0.45 * torch.clamp(repeat_ratio / 0.3, max=1.0)).unsqueeze(1)
         sess_len_vec = session_len.float().squeeze(-1).clamp(min=1.0)
         event_strength_vec = self.event_scale(reversed_sess_event).squeeze(-1).mean(dim=1)
+        comp_rel_conf_sess, sub_rel_conf_sess = self.relation_reliability(repeat_ratio, sess_len_vec, event_strength_vec)
         event_weight = self.event_embedding.weight
         i1, _ = self.ItemGraph(self.adj1_fuzzy, self.adjacency_fuzzy, self.embedding1.weight, 0)
         i2, _ = self.ItemGraph(self.adj2_fuzzy, self.adjacency_T_fuzzy, self.embedding2.weight, 1)
@@ -483,6 +516,11 @@ class MDHG(Module):
         base_weight, comp_weight, sub_weight = self.compute_comp_sub_weights(
             repeat_ratio.mean(), sess_len_vec.mean(), event_strength_vec.mean()
         )
+        comp_weight = comp_weight * comp_rel_conf_sess.mean() * relation_progress
+        sub_weight = sub_weight * sub_rel_conf_sess.mean() * relation_progress
+        base_weight = torch.clamp(1.0 - comp_weight - sub_weight, min=self.base_weight_min, max=self.base_weight_max)
+        weight_sum = torch.clamp(base_weight + comp_weight + sub_weight, min=self.numerical_eps)
+        base_weight, comp_weight, sub_weight = base_weight / weight_sum, comp_weight / weight_sum, sub_weight / weight_sum
         i3 = base_weight * i3 + comp_weight * i_comp + sub_weight * i_sub
         i3 = i3 * ((1.0 - self.item_prior_mix) + self.item_prior_mix * item_hyper_prior_norm.unsqueeze(1))
         i1, i2, i3 = F.normalize(i1, dim=-1), F.normalize(i2, dim=-1), F.normalize(i3, dim=-1)
@@ -508,6 +546,15 @@ class MDHG(Module):
         s3 = hyperedge_act.unsqueeze(1) * s3_fuzzy + (1.0 - hyperedge_act.unsqueeze(1)) * s3_base
         # session-level uses per-session repeat ratio for personalized relation fusion
         base_w_sess, comp_w_sess, sub_w_sess = self.compute_comp_sub_weights(repeat_ratio, sess_len_vec, event_strength_vec)
+        comp_w_sess = comp_w_sess * comp_rel_conf_sess * relation_progress
+        sub_w_sess = sub_w_sess * sub_rel_conf_sess * relation_progress
+        base_w_sess = torch.clamp(1.0 - comp_w_sess - sub_w_sess, min=self.base_weight_min, max=self.base_weight_max)
+        sess_w_sum = torch.clamp(base_w_sess + comp_w_sess + sub_w_sess, min=self.numerical_eps)
+        base_w_sess, comp_w_sess, sub_w_sess = (
+            base_w_sess / sess_w_sum,
+            comp_w_sess / sess_w_sum,
+            sub_w_sess / sess_w_sum
+        )
         base_w, comp_w, sub_w = base_w_sess.unsqueeze(1), comp_w_sess.unsqueeze(1), sub_w_sess.unsqueeze(1)
         s3 = base_w * s3 + comp_w * s_comp + sub_w * s_sub
 
@@ -570,7 +617,7 @@ class MDHG(Module):
             intent_align_loss = torch.tensor(0.0, device=scores_item.device)
         loss_item = ce_loss + self.bpr_loss_weight * bpr_loss + self.intent_align_weight * intent_align_loss
         if train:
-            loss_item = loss_item + self.comp_sub_decouple_weight * comp_sub_orthogonality_loss
+            loss_item = loss_item + (self.comp_sub_decouple_weight * relation_progress) * comp_sub_orthogonality_loss
         con_loss = torch.tensor(0.0, device=scores_item.device)
 
         if train:

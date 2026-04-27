@@ -66,6 +66,14 @@ parser.add_argument('--comp_sub_decouple_weight', type=float, default=0.02, help
 parser.add_argument('--logit_comp_scale', type=float, default=0.20, help='session-aware comp-logit residual scale')
 parser.add_argument('--logit_sub_scale', type=float, default=0.25, help='session-aware sub-logit residual scale')
 parser.add_argument('--logit_short_sub_boost', type=float, default=0.30, help='short-intent boost on substitute logit residual')
+parser.add_argument('--comp_sub_warmup_epochs', type=int, default=1, help='warmup epochs before enabling comp/sub relation branches')
+parser.add_argument('--comp_sub_ramp_epochs', type=int, default=4, help='ramp epochs to reach full comp/sub branch strength')
+parser.add_argument('--rel_conf_comp_scale', type=float, default=1.0, help='reliability logit scale for complementary branch')
+parser.add_argument('--rel_conf_sub_scale', type=float, default=1.0, help='reliability logit scale for substitute branch')
+parser.add_argument('--rel_conf_event_gain', type=float, default=0.20, help='event-strength gain for relation reliability')
+parser.add_argument('--rel_conf_repeat_penalty', type=float, default=0.25, help='repeat-ratio penalty for relation reliability')
+parser.add_argument('--rel_conf_len_gain', type=float, default=0.15, help='session-length gain for relation reliability')
+parser.add_argument('--seed', type=int, default=2026, help='random seed')
 parser.add_argument('--amp', type=int, default=0, help='deprecated: AMP is disabled and this flag is ignored')
 
 opt = parser.parse_args()
@@ -198,7 +206,14 @@ def main():
         comp_sub_decouple_weight=opt.comp_sub_decouple_weight,
         logit_comp_scale=opt.logit_comp_scale,
         logit_sub_scale=opt.logit_sub_scale,
-        logit_short_sub_boost=opt.logit_short_sub_boost
+        logit_short_sub_boost=opt.logit_short_sub_boost,
+        comp_sub_warmup_epochs=opt.comp_sub_warmup_epochs,
+        comp_sub_ramp_epochs=opt.comp_sub_ramp_epochs,
+        rel_conf_comp_scale=opt.rel_conf_comp_scale,
+        rel_conf_sub_scale=opt.rel_conf_sub_scale,
+        rel_conf_event_gain=opt.rel_conf_event_gain,
+        rel_conf_repeat_penalty=opt.rel_conf_repeat_penalty,
+        rel_conf_len_gain=opt.rel_conf_len_gain
     ))
 
     #reset_parameters(model)
@@ -273,7 +288,7 @@ def main():
 
 if __name__ == '__main__':
     start_time = time.time()
-    init_seed(2026)
+    init_seed(opt.seed)
     main()
     end_time = time.time()
     logging.info(f"总运行时间: {end_time - start_time:.2f} 秒")
