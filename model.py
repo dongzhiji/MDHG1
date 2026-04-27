@@ -547,7 +547,7 @@ class MDHG(Module):
         i3 = i3 * ((1.0 - self.item_prior_mix) + self.item_prior_mix * item_hyper_prior_norm.unsqueeze(1))
         i1, i2, i3 = F.normalize(i1, dim=-1), F.normalize(i2, dim=-1), F.normalize(i3, dim=-1)
         item_mix, _ = self.fuzzy_cross_view(i1, i2, i3)
-        # Penalize correlation between comp/sub channels (encourage orthogonality).
+        # Penalize squared channel-wise cosine correlation to encourage comp/sub decorrelation.
         comp_sub_orthogonality_loss = (F.normalize(i_comp, dim=-1) * F.normalize(i_sub, dim=-1)).sum(dim=1).pow(2).mean()
 
         if self.dataset == 'Tmall':

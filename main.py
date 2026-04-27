@@ -6,6 +6,9 @@ import argparse
 import pickle
 import logging
 from datetime import datetime
+HIT_IDX = 0
+MRR_IDX = 1
+NDCG_IDX = 2
 # 设置日志
 def setup_logging():
     log_dir = 'logs'
@@ -127,7 +130,12 @@ def parse_seed_list(seed_list_str, default_seed):
         token = token.strip()
         if token == '':
             continue
-        seeds.append(int(token))
+        try:
+            seeds.append(int(token))
+        except ValueError as e:
+            raise ValueError(
+                f"Invalid seed value '{token}' in --seed_list='{seed_list_str}', expected comma-separated integers"
+            ) from e
     return seeds if len(seeds) > 0 else [int(default_seed)]
 
 def run_single_seed(seed):
@@ -346,9 +354,9 @@ def main():
                 )
             f.write("-" * 60 + "\n")
         if len(all_seed_results) > 1:
-            mrr10 = [r[1]['metric10'][1] for r in all_seed_results]
-            ndcg10 = [r[1]['metric10'][2] for r in all_seed_results]
-            hit10 = [r[1]['metric10'][0] for r in all_seed_results]
+            mrr10 = [r[1]['metric10'][MRR_IDX] for r in all_seed_results]
+            ndcg10 = [r[1]['metric10'][NDCG_IDX] for r in all_seed_results]
+            hit10 = [r[1]['metric10'][HIT_IDX] for r in all_seed_results]
             f.write(
                 f"seed-avg@10: Hit={np.mean(hit10):.4f}%, "
                 f"MRR={np.mean(mrr10):.4f}%, NDCG={np.mean(ndcg10):.4f}%\n"
