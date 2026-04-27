@@ -73,7 +73,15 @@ parser.add_argument('--rel_conf_sub_scale', type=float, default=1.0, help='relia
 parser.add_argument('--rel_conf_event_gain', type=float, default=0.20, help='event-strength gain for relation reliability')
 parser.add_argument('--rel_conf_repeat_penalty', type=float, default=0.25, help='repeat-ratio penalty for relation reliability')
 parser.add_argument('--rel_conf_len_gain', type=float, default=0.15, help='session-length gain for relation reliability')
+parser.add_argument('--enable_comp_branch', type=int, default=1, help='enable complementary hypergraph branch (1/0)')
+parser.add_argument('--enable_sub_branch', type=int, default=1, help='enable substitute hypergraph branch (1/0)')
+parser.add_argument('--enable_logit_residual', type=int, default=1, help='enable comp/sub residual logit fusion (1/0)')
+parser.add_argument('--enable_rel_conf_gate', type=int, default=1, help='enable relation reliability gating (1/0)')
+parser.add_argument('--early_stop_patience', type=int, default=0, help='early stop patience on monitor metric; 0 disables early stop')
+parser.add_argument('--early_stop_metric', default='mrr10', choices=['mrr10', 'ndcg10', 'hit10'], help='metric used for early stopping')
+parser.add_argument('--early_stop_min_epoch', type=int, default=5, help='minimum epochs before early-stop check starts')
 parser.add_argument('--seed', type=int, default=2026, help='random seed')
+parser.add_argument('--seed_list', default='', help='comma-separated seeds, e.g., "2026,2027,2028"; empty uses --seed')
 parser.add_argument('--amp', type=int, default=0, help='deprecated: AMP is disabled and this flag is ignored')
 
 opt = parser.parse_args()
@@ -111,9 +119,21 @@ def init_seed(seed=None):
     torch.cuda.manual_seed_all(seed)
     logging.info(f"Random seed set to: {seed}")
 
-def main():
+def parse_seed_list(seed_list_str, default_seed):
+    if seed_list_str is None or seed_list_str.strip() == '':
+        return [int(default_seed)]
+    seeds = []
+    for token in seed_list_str.split(','):
+        token = token.strip()
+        if token == '':
+            continue
+        seeds.append(int(token))
+    return seeds if len(seeds) > 0 else [int(default_seed)]
+
+def run_single_seed(seed):
     logging.info("=" * 60)
-    logging.info("开始加载数据...")
+    logging.info(f"开始加载数据... seed={seed}")
+    init_seed(seed)
 
     train_data = pickle.load(open('datasets/' + opt.dataset + '/train.txt', 'rb'))
     test_data = pickle.load(open('datasets/' + opt.dataset + '/test.txt', 'rb'))
@@ -213,7 +233,11 @@ def main():
         rel_conf_sub_scale=opt.rel_conf_sub_scale,
         rel_conf_event_gain=opt.rel_conf_event_gain,
         rel_conf_repeat_penalty=opt.rel_conf_repeat_penalty,
-        rel_conf_len_gain=opt.rel_conf_len_gain
+        rel_conf_len_gain=opt.rel_conf_len_gain,
+        enable_comp_branch=bool(opt.enable_comp_branch),
+        enable_sub_branch=bool(opt.enable_sub_branch),
+        enable_logit_residual=bool(opt.enable_logit_residual),
+        enable_rel_conf_gate=bool(opt.enable_rel_conf_gate)
     ))
 
     #reset_parameters(model)
@@ -227,6 +251,9 @@ def main():
 
     logging.info(f"开始训练，共 {opt.epoch} 个epoch")
 
+    best_monitor = -1e9
+    early_stop_bad_count = 0
+    epochs_run = 0
     for epoch in range(opt.epoch):
         logging.info('-' * 60)
         logging.info(f'Epoch: {epoch}')
@@ -262,25 +289,74 @@ def main():
                 f'  Best Hit@{K}: {best_results["metric%d" % K][0]:.4f}% (epoch {best_results["epoch%d" % K][0]}), '
                 f'Best MRR@{K}: {best_results["metric%d" % K][1]:.4f}% (epoch {best_results["epoch%d" % K][1]}), '
                 f'Best NDCG@{K}: {best_results["metric%d" % K][2]:.4f}% (epoch {best_results["epoch%d" % K][2]})')
+        monitor_score = metrics[opt.early_stop_metric]
+        if monitor_score > best_monitor + 1e-8:
+            best_monitor = monitor_score
+            early_stop_bad_count = 0
+        else:
+            early_stop_bad_count += 1
+        epochs_run = epoch + 1
+        if (
+            opt.early_stop_patience > 0 and
+            epochs_run >= max(1, opt.early_stop_min_epoch) and
+            early_stop_bad_count >= opt.early_stop_patience
+        ):
+            logging.info(
+                f"触发早停: metric={opt.early_stop_metric}, patience={opt.early_stop_patience}, "
+                f"best={best_monitor:.4f}, stop_epoch={epoch}"
+            )
+            break
 
-    # 最终结果汇总
+    return best_results, epochs_run
+
+def main():
+    seed_list = parse_seed_list(opt.seed_list, opt.seed)
+    logging.info(f"统一评估协议: seed_list={seed_list}, early_stop_metric={opt.early_stop_metric}, "
+                 f"patience={opt.early_stop_patience}, min_epoch={opt.early_stop_min_epoch}")
+    all_seed_results = []
+    for seed in seed_list:
+        best_results, epochs_run = run_single_seed(seed)
+        all_seed_results.append((seed, best_results, epochs_run))
+
     logging.info("=" * 60)
     logging.info("训练完成！最终最佳结果:")
-    for K in top_K:
-        logging.info(
-            f'K={K}: Hit={best_results["metric%d" % K][0]:.4f}%, MRR={best_results["metric%d" % K][1]:.4f}%, NDCG={best_results["metric%d" % K][2]:.4f}%')
+    for seed, best_results, epochs_run in all_seed_results:
+        logging.info(f"[seed={seed}] epochs_run={epochs_run}")
+        for K in [5, 10, 20, 50]:
+            logging.info(
+                f'  K={K}: Hit={best_results["metric%d" % K][0]:.4f}%, '
+                f'MRR={best_results["metric%d" % K][1]:.4f}%, '
+                f'NDCG={best_results["metric%d" % K][2]:.4f}%'
+            )
 
-    # 保存结果到文件
     result_file = log_file.replace('.log', '_results.txt')
     with open(result_file, 'w') as f:
         f.write("=" * 60 + "\n")
         f.write(f"数据集: {opt.dataset}\n")
         f.write(f"参数: {opt}\n")
+        f.write(f"seed_list: {seed_list}\n")
         f.write("=" * 60 + "\n")
-        f.write("最终最佳结果:\n")
-        for K in top_K:
+        for seed, best_results, epochs_run in all_seed_results:
+            f.write(f"[seed={seed}] epochs_run={epochs_run}\n")
+            for K in [5, 10, 20, 50]:
+                f.write(
+                    f"K={K}: Hit={best_results['metric%d' % K][0]:.4f}%, "
+                    f"MRR={best_results['metric%d' % K][1]:.4f}%, "
+                    f"NDCG={best_results['metric%d' % K][2]:.4f}%\n"
+                )
+            f.write("-" * 60 + "\n")
+        if len(all_seed_results) > 1:
+            mrr10 = [r[1]['metric10'][1] for r in all_seed_results]
+            ndcg10 = [r[1]['metric10'][2] for r in all_seed_results]
+            hit10 = [r[1]['metric10'][0] for r in all_seed_results]
             f.write(
-                f"K={K}: Hit={best_results['metric%d' % K][0]:.4f}%, MRR={best_results['metric%d' % K][1]:.4f}%, NDCG={best_results['metric%d' % K][2]:.4f}%\n")
+                f"seed-avg@10: Hit={np.mean(hit10):.4f}%, "
+                f"MRR={np.mean(mrr10):.4f}%, NDCG={np.mean(ndcg10):.4f}%\n"
+            )
+            f.write(
+                f"seed-std@10: Hit={np.std(hit10):.4f}, "
+                f"MRR={np.std(mrr10):.4f}, NDCG={np.std(ndcg10):.4f}\n"
+            )
         f.write("=" * 60 + "\n")
 
     logging.info(f"结果已保存到: {result_file}")
@@ -288,7 +364,6 @@ def main():
 
 if __name__ == '__main__':
     start_time = time.time()
-    init_seed(opt.seed)
     main()
     end_time = time.time()
     logging.info(f"总运行时间: {end_time - start_time:.2f} 秒")

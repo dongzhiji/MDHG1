@@ -107,7 +107,9 @@ class MDHG(Module):
                  logit_comp_scale=0.20, logit_sub_scale=0.25, logit_short_sub_boost=0.30,
                  comp_sub_warmup_epochs=1, comp_sub_ramp_epochs=4,
                  rel_conf_comp_scale=1.0, rel_conf_sub_scale=1.0,
-                 rel_conf_event_gain=0.20, rel_conf_repeat_penalty=0.25, rel_conf_len_gain=0.15):
+                 rel_conf_event_gain=0.20, rel_conf_repeat_penalty=0.25, rel_conf_len_gain=0.15,
+                 enable_comp_branch=True, enable_sub_branch=True,
+                 enable_logit_residual=True, enable_rel_conf_gate=True):
         super(MDHG, self).__init__()
         self.emb_size = emb_size
         self.batch_size = batch_size
@@ -227,6 +229,10 @@ class MDHG(Module):
         self.rel_conf_event_gain = rel_conf_event_gain
         self.rel_conf_repeat_penalty = rel_conf_repeat_penalty
         self.rel_conf_len_gain = rel_conf_len_gain
+        self.enable_comp_branch = bool(enable_comp_branch)
+        self.enable_sub_branch = bool(enable_sub_branch)
+        self.enable_logit_residual = bool(enable_logit_residual)
+        self.enable_rel_conf_gate = bool(enable_rel_conf_gate)
         self.rel_conf_sub_short_gain = 0.35
         self.rel_conf_sub_repeat_gain = 0.45
         self.rel_conf_sub_event_gain = 0.20
@@ -506,6 +512,9 @@ class MDHG(Module):
         sess_len_vec = session_len.float().squeeze(-1).clamp(min=1.0)
         event_strength_vec = self.event_scale(reversed_sess_event).squeeze(-1).mean(dim=1)
         comp_rel_conf_sess, sub_rel_conf_sess = self.relation_reliability(repeat_ratio, sess_len_vec, event_strength_vec)
+        if not self.enable_rel_conf_gate:
+            comp_rel_conf_sess = torch.ones_like(comp_rel_conf_sess)
+            sub_rel_conf_sess = torch.ones_like(sub_rel_conf_sess)
         event_weight = self.event_embedding.weight
         i1, _ = self.ItemGraph(self.adj1_fuzzy, self.adjacency_fuzzy, self.embedding1.weight, 0)
         i2, _ = self.ItemGraph(self.adj2_fuzzy, self.adjacency_T_fuzzy, self.embedding2.weight, 1)
@@ -525,6 +534,10 @@ class MDHG(Module):
         base_weight, comp_weight, sub_weight = self.compute_comp_sub_weights(
             repeat_ratio.mean(), sess_len_vec.mean(), event_strength_vec.mean()
         )
+        if not self.enable_comp_branch:
+            comp_weight = torch.zeros_like(comp_weight)
+        if not self.enable_sub_branch:
+            sub_weight = torch.zeros_like(sub_weight)
         comp_weight = comp_weight * comp_rel_conf_sess.mean() * relation_progress
         sub_weight = sub_weight * sub_rel_conf_sess.mean() * relation_progress
         base_weight = torch.clamp(1.0 - comp_weight - sub_weight, min=self.base_weight_min, max=self.base_weight_max)
@@ -555,6 +568,10 @@ class MDHG(Module):
         s3 = hyperedge_act.unsqueeze(1) * s3_fuzzy + (1.0 - hyperedge_act.unsqueeze(1)) * s3_base
         # session-level uses per-session repeat ratio for personalized relation fusion
         base_w_sess, comp_w_sess, sub_w_sess = self.compute_comp_sub_weights(repeat_ratio, sess_len_vec, event_strength_vec)
+        if not self.enable_comp_branch:
+            comp_w_sess = torch.zeros_like(comp_w_sess)
+        if not self.enable_sub_branch:
+            sub_w_sess = torch.zeros_like(sub_w_sess)
         comp_w_sess = comp_w_sess * comp_rel_conf_sess * relation_progress
         sub_w_sess = sub_w_sess * sub_rel_conf_sess * relation_progress
         base_w_sess = torch.clamp(1.0 - comp_w_sess - sub_w_sess, min=self.base_weight_min, max=self.base_weight_max)
@@ -610,7 +627,10 @@ class MDHG(Module):
             sub_w_sess.unsqueeze(1) + self.logit_short_sub_boost * short_gate
         )
         sub_logit_gate = torch.clamp(sub_logit_gate, min=0.0, max=self.sub_logit_gate_max)
-        scores_item = scores_base + comp_logit_gate * scores_comp + sub_logit_gate * scores_sub
+        if self.enable_logit_residual:
+            scores_item = scores_base + comp_logit_gate * scores_comp + sub_logit_gate * scores_sub
+        else:
+            scores_item = scores_base
 
         # temperature scaling for better ranking sharpness
         scores_item = scores_item / self.score_temperature
@@ -625,7 +645,7 @@ class MDHG(Module):
         else:
             intent_align_loss = torch.tensor(0.0, device=scores_item.device)
         loss_item = ce_loss + self.bpr_loss_weight * bpr_loss + self.intent_align_weight * intent_align_loss
-        if train:
+        if train and self.enable_comp_branch and self.enable_sub_branch:
             loss_item = loss_item + (self.comp_sub_decouple_weight * relation_progress) * comp_sub_orthogonality_loss
         con_loss = torch.tensor(0.0, device=scores_item.device)
 

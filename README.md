@@ -23,3 +23,25 @@ python main.py --dataset=retailrocket --seed=2027 --comp_sub_warmup_epochs=1 --c
 
 python main.py --dataset=diginetica --seed=2028 --comp_sub_warmup_epochs=1 --comp_sub_ramp_epochs=4 --logit_comp_scale=0.22
 ```
+
+Unified protocol (same seeds + early stop) and required ablations:
+
+```
+# seed protocol
+--seed_list=2026,2027,2028 --early_stop_metric=mrr10 --early_stop_patience=3 --early_stop_min_epoch=6
+
+# baseline
+python main.py --dataset=Tmall --enable_comp_branch=0 --enable_sub_branch=0 --enable_logit_residual=0 --enable_rel_conf_gate=0 --seed_list=2026,2027,2028 --early_stop_metric=mrr10 --early_stop_patience=3 --early_stop_min_epoch=6
+
+# +comp hypergraph
+python main.py --dataset=Tmall --enable_comp_branch=1 --enable_sub_branch=0 --enable_logit_residual=0 --seed_list=2026,2027,2028 --early_stop_metric=mrr10 --early_stop_patience=3 --early_stop_min_epoch=6
+
+# +sub hypergraph
+python main.py --dataset=Tmall --enable_comp_branch=0 --enable_sub_branch=1 --enable_logit_residual=0 --seed_list=2026,2027,2028 --early_stop_metric=mrr10 --early_stop_patience=3 --early_stop_min_epoch=6
+
+# +comp+sub (no logit residual)
+python main.py --dataset=Tmall --enable_comp_branch=1 --enable_sub_branch=1 --enable_logit_residual=0 --seed_list=2026,2027,2028 --early_stop_metric=mrr10 --early_stop_patience=3 --early_stop_min_epoch=6
+
+# +logit residual fusion (full model)
+python main.py --dataset=Tmall --enable_comp_branch=1 --enable_sub_branch=1 --enable_logit_residual=1 --enable_rel_conf_gate=1 --seed_list=2026,2027,2028 --early_stop_metric=mrr10 --early_stop_patience=3 --early_stop_min_epoch=6
+```
