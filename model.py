@@ -227,6 +227,12 @@ class MDHG(Module):
         self.rel_conf_event_gain = rel_conf_event_gain
         self.rel_conf_repeat_penalty = rel_conf_repeat_penalty
         self.rel_conf_len_gain = rel_conf_len_gain
+        self.rel_conf_sub_short_gain = 0.35
+        self.rel_conf_sub_repeat_gain = 0.45
+        self.rel_conf_sub_event_gain = 0.20
+        self.rel_conf_sub_bias = -0.20
+        self.default_session_len = 3.0
+        self.default_event_strength = 0.5
         self._position_weight_cache = dict()
         self.init_parameters()
 
@@ -292,9 +298,9 @@ class MDHG(Module):
 
     def compute_comp_sub_weights(self, repeat_ratio, session_len=None, event_strength=None):
         if session_len is None:
-            session_len = torch.ones_like(repeat_ratio) * 3.0
+            session_len = torch.ones_like(repeat_ratio) * self.default_session_len
         if event_strength is None:
-            event_strength = torch.ones_like(repeat_ratio) * 0.5
+            event_strength = torch.ones_like(repeat_ratio) * self.default_event_strength
         short_factor = torch.clamp(1.0 / torch.sqrt(session_len.float().clamp(min=1.0)), min=0.2, max=1.0)
         event_factor = torch.clamp(event_strength.float(), min=0.0, max=2.0)
         comp_adapt = torch.clamp(1.0 + 0.15 * event_factor - 0.10 * short_factor, min=0.85, max=1.25)
@@ -484,7 +490,10 @@ class MDHG(Module):
             self.rel_conf_event_gain * event_strength + self.rel_conf_len_gain * long_factor - self.rel_conf_repeat_penalty * repeat_ratio
         )
         sub_logit = self.rel_conf_sub_scale * (
-            0.35 * short_factor + 0.45 * repeat_ratio + 0.20 * event_strength - 0.20
+            self.rel_conf_sub_short_gain * short_factor +
+            self.rel_conf_sub_repeat_gain * repeat_ratio +
+            self.rel_conf_sub_event_gain * event_strength +
+            self.rel_conf_sub_bias
         )
         comp_rel = torch.clamp(torch.sigmoid(comp_logit), min=0.05, max=1.0)
         sub_rel = torch.clamp(torch.sigmoid(sub_logit), min=0.05, max=1.0)

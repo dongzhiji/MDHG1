@@ -638,7 +638,7 @@ class Data():
                     cache_dir = comp_sub_cache_dir if comp_sub_cache_dir else os.path.join('datasets', 'graph_cache')
                     os.makedirs(cache_dir, exist_ok=True)
                     prefix = cache_prefix if cache_prefix else 'graph'
-                    sig = hashlib.sha256(json.dumps({'n_node': n_node, **graph_cfg}, sort_keys=True).encode('utf-8')).hexdigest()[:32]
+                    sig = hashlib.sha256(json.dumps({'n_node': n_node, **graph_cfg}, sort_keys=True).encode('utf-8')).hexdigest()[:48]
                     cache_file = os.path.join(cache_dir, f'{prefix}_comp_sub_{sig}.pkl')
                     if os.path.exists(cache_file):
                         with open(cache_file, 'rb') as f:
