@@ -23,6 +23,30 @@ def setup_logging():
         ]
     )
     return log_file
+
+def resolve_dataset_dir(dataset_name):
+    default_dir = os.path.join('datasets', dataset_name)
+    if os.path.isdir(default_dir):
+        return default_dir
+    lower_dir = os.path.join('datasets', dataset_name.lower())
+    if os.path.isdir(lower_dir):
+        return lower_dir
+    try:
+        for entry in os.listdir('datasets'):
+            if entry.lower() == dataset_name.lower():
+                return os.path.join('datasets', entry)
+    except OSError:
+        pass
+    return default_dir
+
+def load_pickle_with_fallback(primary_path, fallback_paths=()):
+    tried = []
+    for path in [primary_path] + list(fallback_paths):
+        tried.append(path)
+        if os.path.exists(path):
+            with open(path, 'rb') as f:
+                return pickle.load(f), path
+    raise FileNotFoundError(f"Missing dataset file. Tried: {', '.join(tried)}")
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', default='Tmall', help='dataset name: retailrocket/diginetica/Nowplaying/sample')
 parser.add_argument('--epoch', type=int, default=20, help='number of epochs to train for')
@@ -103,27 +127,39 @@ def init_seed(seed=None):
 def main():
     logging.info("=" * 60)
     logging.info("开始加载数据...")
+    dataset_key = opt.dataset.lower()
+    dataset_dir = resolve_dataset_dir(opt.dataset)
+    train_path = os.path.join(dataset_dir, 'train.txt')
+    test_path = os.path.join(dataset_dir, 'test.txt')
+    all_train_path = os.path.join(dataset_dir, 'all_train_seq.txt')
 
-    train_data = pickle.load(open('datasets/' + opt.dataset + '/train.txt', 'rb'))
-    test_data = pickle.load(open('datasets/' + opt.dataset + '/test.txt', 'rb'))
-    all_train = pickle.load(open('datasets/' + opt.dataset + '/all_train_seq.txt', 'rb'))
+    train_data, train_src = load_pickle_with_fallback(train_path, [all_train_path, test_path])
+    test_data, test_src = load_pickle_with_fallback(test_path, [train_path])
+    all_train, all_train_src = load_pickle_with_fallback(all_train_path, [train_path, test_path])
 
-    if opt.dataset == 'Tmall':
+    if train_src != train_path:
+        logging.warning(f"训练数据缺失，使用替代文件: {train_src}")
+    if test_src != test_path:
+        logging.warning(f"测试数据缺失，使用替代文件: {test_src}")
+    if all_train_src != all_train_path:
+        logging.warning(f"全量训练序列缺失，使用替代文件: {all_train_src}")
+
+    if dataset_key == 'tmall':
         n_node = 40727
-    elif opt.dataset == 'retailrocket':#最大的 item ID = 36968
+    elif dataset_key == 'retailrocket':#最大的 item ID = 36968
         n_node = 36968
-    elif opt.dataset == 'amazon':
+    elif dataset_key == 'amazon':
         n_node = 18888
-    elif opt.dataset == 'lastfm':#最大的 item ID = 38997
+    elif dataset_key == 'lastfm':#最大的 item ID = 38997
         n_node = 38997
-    elif opt.dataset == 'diginetica':#最大的 item ID = 43097
+    elif dataset_key == 'diginetica':#最大的 item ID = 43097
         n_node =43097
-    elif opt.dataset == 'Nowplaying':
+    elif dataset_key == 'nowplaying':
         n_node = 60416
     else:
         n_node = 309
-    logging.info(f"数据集: {opt.dataset}, 节点数: {n_node}")
-    comp_sub_cache_dir = opt.comp_sub_cache_dir if opt.comp_sub_cache_dir else os.path.join('datasets', opt.dataset, 'graph_cache')
+    logging.info(f"数据集: {opt.dataset} (目录: {dataset_dir}), 节点数: {n_node}")
+    comp_sub_cache_dir = opt.comp_sub_cache_dir if opt.comp_sub_cache_dir else os.path.join(dataset_dir, 'graph_cache')
 
     train_data = Data(
         train_data, all_train, shuffle=False, n_node=n_node, comp_max_gap=opt.comp_max_gap,
@@ -136,7 +172,8 @@ def main():
         sub_head_quantile=opt.sub_head_quantile, sub_head_scale=opt.sub_head_scale, sub_tail_scale=opt.sub_tail_scale,
         comp_sub_cache=bool(opt.comp_sub_cache),
         comp_sub_cache_dir=comp_sub_cache_dir,
-        cache_prefix=f"{opt.dataset}_train"
+        cache_prefix=f"{opt.dataset}_train",
+        dataset=dataset_key
     )
     test_data = Data(
         test_data, all_train, shuffle=False, n_node=n_node, comp_max_gap=opt.comp_max_gap,
@@ -149,7 +186,8 @@ def main():
         sub_head_quantile=opt.sub_head_quantile, sub_head_scale=opt.sub_head_scale, sub_tail_scale=opt.sub_tail_scale,
         comp_sub_cache=bool(opt.comp_sub_cache),
         comp_sub_cache_dir=comp_sub_cache_dir,
-        cache_prefix=f"{opt.dataset}_train"
+        cache_prefix=f"{opt.dataset}_train",
+        dataset=dataset_key
     )
 
     logging.info("创建模型...")

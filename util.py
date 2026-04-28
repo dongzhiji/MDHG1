@@ -29,8 +29,9 @@ def _safe_get_event(events, idx):
     return events[idx]
 
 def _relation_fuzzy_weight(freq, pos_i, sess_len, e_i, e_j, relation='r1', repeat_ratio=0.0, dataset='Tmall'):
+    dataset_key = dataset.lower() if isinstance(dataset, str) else ''
     # Tmall数据集特定参数
-    if dataset == 'Tmall':
+    if dataset_key == 'tmall':
         # 1) 频次隶属度 - Tmall中高频共现更重要
         if relation == 'r3':
             mu_freq = fuzzy_membership(freq, center=3.0, scale=10.0)
@@ -117,7 +118,7 @@ def data_masks(all_sessions, n_node):
     return coo_matrix((data, (row, col)), shape=(n_node, n_node))
 
 # ===== 改造：动态超图/关系图模糊边权 =====
-def data_masks_fuzzy(all_sessions, n_node, all_events=None):
+def data_masks_fuzzy(all_sessions, n_node, all_events=None, dataset='Tmall'):
     adj = dict()
     for s_idx, sess in enumerate(all_sessions):
         events = all_events[s_idx] if all_events is not None and s_idx < len(all_events) else None
@@ -138,7 +139,7 @@ def data_masks_fuzzy(all_sessions, n_node, all_events=None):
                 adj[current_idx][current_idx] = 1.0
             old = adj[current_idx].get(next_idx, 0.0)
             freq = old + 1.0
-            w = _relation_fuzzy_weight(freq, i, sess_len, ei, ej, relation='r1', repeat_ratio=repeat_ratio)
+            w = _relation_fuzzy_weight(freq, i, sess_len, ei, ej, relation='r1', repeat_ratio=repeat_ratio, dataset=dataset)
             adj[current_idx][next_idx] = old + w
     for i in range(n_node):
         if i not in adj:
@@ -170,7 +171,7 @@ def data_R(all_sessions, n_node):
     return coo_matrix((data, (row, col)), shape=(edge_idx_s, n_node))
 
 # ===== 改造：模糊超边生成（会话级超边） =====
-def data_R_fuzzy(all_sessions, n_node, all_events=None):
+def data_R_fuzzy(all_sessions, n_node, all_events=None, dataset='Tmall'):
     row, col, data = [], [], []
     edge_idx_s = 0
     for s_idx, sess in enumerate(all_sessions):
@@ -215,7 +216,7 @@ def data_R1(all_sessions, n_node):
             data.append(adj[i][j])
     return coo_matrix((data, (row, col)), shape=(n_node, n_node))
 
-def data_R1_fuzzy(all_sessions, n_node, all_events=None):
+def data_R1_fuzzy(all_sessions, n_node, all_events=None, dataset='Tmall'):
     adj = dict()
     for s_idx, sess in enumerate(all_sessions):
         events = all_events[s_idx] if all_events is not None and s_idx < len(all_events) else None
@@ -231,7 +232,7 @@ def data_R1_fuzzy(all_sessions, n_node, all_events=None):
                 freq = old + 1.0
                 ei = _safe_get_event(events, i_pos)
                 ej = _safe_get_event(events, j_pos)
-                w = _relation_fuzzy_weight(freq, i_pos, sess_len, ei, ej, relation='r3', repeat_ratio=repeat_ratio)
+                w = _relation_fuzzy_weight(freq, i_pos, sess_len, ei, ej, relation='r3', repeat_ratio=repeat_ratio, dataset=dataset)
                 adj[i][j] = old + w
     row, col, data = [], [], []
     for i in adj:
@@ -436,6 +437,10 @@ def data_item_hypergraph_comp_sub(
     comp_adj = dict()
     sub_adj = dict()
     item_freq = np.zeros(n_node, dtype=np.float32)
+    item_pos_sum = np.zeros(n_node, dtype=np.float32)
+    item_len_sum = np.zeros(n_node, dtype=np.float32)
+    item_pos_cnt = np.zeros(n_node, dtype=np.float32)
+    max_sess_len = 0.0
     prev_to_next = dict()
     next_to_prev = dict()
     co_buy_adj = dict()
@@ -447,10 +452,18 @@ def data_item_hypergraph_comp_sub(
     for sess in all_sessions:
         # convert 1-indexed item ids to 0-indexed graph ids; skip padding/out-of-range ids
         seq = [x - 1 for x in sess if x != 0 and 1 <= x <= n_node]
+        if len(seq) == 0:
+            continue
+        seq_len = len(seq)
+        max_sess_len = max(max_sess_len, float(seq_len))
+        for pos, item_id in enumerate(seq):
+            item_freq[item_id] += 1.0
+            pos_norm = 0.0 if seq_len <= 1 else pos / float(seq_len - 1)
+            item_pos_sum[item_id] += pos_norm
+            item_len_sum[item_id] += seq_len
+            item_pos_cnt[item_id] += 1.0
         if len(seq) <= 1:
             continue
-        for item_id in seq:
-            item_freq[item_id] += 1.0
         uniq = list(dict.fromkeys(seq))
         for i in range(len(uniq)):
             a = uniq[i]
@@ -515,6 +528,34 @@ def data_item_hypergraph_comp_sub(
         norm_co = _pair_norm_strength(co, fi, fj)
         return 1.0 / (1.0 + sub_co_buy_suppress * norm_co)
 
+    max_sess_len = max(max_sess_len, 1.0)
+    pos_mean = np.zeros(n_node, dtype=np.float32)
+    len_mean = np.zeros(n_node, dtype=np.float32)
+    valid_mask = item_pos_cnt > 0
+    pos_mean[valid_mask] = item_pos_sum[valid_mask] / item_pos_cnt[valid_mask]
+    len_mean[valid_mask] = item_len_sum[valid_mask] / item_pos_cnt[valid_mask]
+
+    def session_dist_factor(i, j, mode):
+        if item_pos_cnt[i] <= 0 or item_pos_cnt[j] <= 0:
+            return 1.0
+        pos_gap = abs(pos_mean[i] - pos_mean[j])
+        len_gap = abs(len_mean[i] - len_mean[j]) / (max_sess_len + EPSILON)
+        if mode == 'comp':
+            return float(np.clip(0.9 + 0.4 * pos_gap + 0.2 * (1.0 - len_gap), 0.7, 1.4))
+        sim = float(np.exp(-(pos_gap + len_gap)))
+        return float(np.clip(0.9 + 0.5 * sim, 0.7, 1.4))
+
+    def co_buy_boost(i, j):
+        co = co_buy_adj.get(i, {}).get(j, 0.0)
+        if co <= 0.0:
+            return 1.0
+        fi = float(item_freq[i]) if 0 <= i < len(item_freq) else 0.0
+        fj = float(item_freq[j]) if 0 <= j < len(item_freq) else 0.0
+        if fi <= 0.0 or fj <= 0.0:
+            return 1.0
+        norm_co = _pair_norm_strength(co, fi, fj)
+        return float(1.0 + 0.5 * np.tanh(norm_co))
+
     # substitute: different items competing under same previous context
     for _, nxt_dict in prev_to_next.items():
         items = sorted(
@@ -548,6 +589,19 @@ def data_item_hypergraph_comp_sub(
                 p_ba = co_buy_penalty(ib, ia)
                 add_sub_pair(ia, ib, w * p_ab)
                 add_sub_pair(ib, ia, w * p_ba)
+
+    for src, dst_dict in comp_adj.items():
+        for dst in list(dst_dict.keys()):
+            weight = dst_dict[dst]
+            weight *= co_buy_boost(src, dst)
+            weight *= session_dist_factor(src, dst, 'comp')
+            dst_dict[dst] = weight
+
+    for src, dst_dict in sub_adj.items():
+        for dst in list(dst_dict.keys()):
+            weight = dst_dict[dst]
+            weight *= session_dist_factor(src, dst, 'sub')
+            dst_dict[dst] = weight
 
     comp_adj = _score_relation_graph(
         comp_adj, item_freq, min_support=min_support, min_norm_weight=min_norm_weight,
@@ -587,7 +641,7 @@ class Data():
             sub_context_topk=20, sub_context_min=2, comp_symmetric=True,
             sub_co_buy_suppress=0.6, comp_head_quantile=0.8, comp_head_scale=1.15, comp_tail_scale=0.85,
             sub_head_quantile=0.8, sub_head_scale=1.15, sub_tail_scale=0.85,
-            comp_sub_cache=True, comp_sub_cache_dir='', cache_prefix=''):
+            comp_sub_cache=True, comp_sub_cache_dir='', cache_prefix='', dataset=None):
         if isinstance(data, tuple):
             data = list(data)
         if len(data) == 2:
@@ -604,15 +658,16 @@ class Data():
         else:
             all_train_items = all_train
             all_train_events = None
+        dataset_key = dataset.lower() if isinstance(dataset, str) else ''
         print(f"Building graphs with n_node={n_node}...")
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
             adj = data_masks(all_train_items, n_node)
             R = data_R(all_train_items, n_node)
             R1 = data_R1(all_train_items, n_node)
-            adj_fuzzy = data_masks_fuzzy(all_train_items, n_node, all_events=all_train_events)
-            R_fuzzy = data_R_fuzzy(all_train_items, n_node, all_events=all_train_events)
-            R1_fuzzy = data_R1_fuzzy(all_train_items, n_node, all_events=all_train_events)
+            adj_fuzzy = data_masks_fuzzy(all_train_items, n_node, all_events=all_train_events, dataset=dataset_key)
+            R_fuzzy = data_R_fuzzy(all_train_items, n_node, all_events=all_train_events, dataset=dataset_key)
+            R1_fuzzy = data_R1_fuzzy(all_train_items, n_node, all_events=all_train_events, dataset=dataset_key)
             graph_cfg = {
                 'max_gap': comp_max_gap,
                 'topk': comp_sub_topk,

@@ -109,6 +109,7 @@ class MDHG(Module):
         self.batch_size = batch_size
         self.n_node = n_node
         self.dataset = dataset
+        self.dataset_key = dataset.lower() if isinstance(dataset, str) else ''
         self.lr = lr
         self.layers = layers
         self.use_amp = False
@@ -145,7 +146,7 @@ class MDHG(Module):
         self.event_embedding = nn.Embedding(4, self.emb_size)
         self.event_scale = nn.Embedding(4, 1)
         self.pos_decay = 0.2
-        self.pos_len = 1000 if self.dataset == 'retailrocket' else 200
+        self.pos_len = 1000 if self.dataset_key == 'retailrocket' else 200
         self.pos_embedding = nn.Embedding(self.pos_len, self.emb_size)
         self.ItemGraph = ItemConv(layers, K1, K2, K3, dropout, alpha, emb_size=self.emb_size)
         self.CompHyperGraph = HyperGraphConv(layers, dropout, emb_size=self.emb_size)
@@ -245,7 +246,7 @@ class MDHG(Module):
     def build_fuzzy_relation_prior(self, session_item, reversed_sess_event):
         repeat_ratio = self.calc_repeat_ratio_batch(session_item)
         evt_strength = self.event_scale(reversed_sess_event).squeeze(-1).mean(dim=1)
-        if self.dataset == 'Tmall':
+        if self.dataset_key == 'tmall':
             c1 = torch.clamp(0.70 + 0.20 * evt_strength - 0.15 * repeat_ratio, min=0.10)  # 顺序
             c2 = torch.clamp(0.60 + 0.15 * (1.0 - repeat_ratio), min=0.10)  # 转移
             c3 = torch.clamp(0.30 + 0.35 * repeat_ratio + 0.10 * evt_strength, min=0.10)  # 共现
@@ -485,7 +486,7 @@ class MDHG(Module):
         # Penalize comp/sub channel correlation so complementary and substitute semantics remain disentangled.
         comp_sub_decouple_loss = (F.normalize(i_comp, dim=-1) * F.normalize(i_sub, dim=-1)).sum(dim=1).pow(2).mean()
 
-        if self.dataset == 'Tmall':
+        if self.dataset_key == 'tmall':
             s1 = self.generate_sess_emb_npos(i1, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
             s2 = self.generate_sess_emb_npos(i2, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
             s3_base = self.generate_sess_emb_npos(i3_base, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
