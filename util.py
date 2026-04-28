@@ -458,7 +458,7 @@ def data_item_hypergraph_comp_sub(
         max_sess_len = max(max_sess_len, float(seq_len))
         for pos, item_id in enumerate(seq):
             item_freq[item_id] += 1.0
-            pos_norm = 0.0 if seq_len <= 1 else pos / float(seq_len - 1)
+            pos_norm = pos / float(max(seq_len - 1, 1))
             item_pos_sum[item_id] += pos_norm
             item_len_sum[item_id] += seq_len
             item_pos_cnt[item_id] += 1.0
@@ -535,6 +535,7 @@ def data_item_hypergraph_comp_sub(
     pos_mean[valid_mask] = item_pos_sum[valid_mask] / item_pos_cnt[valid_mask]
     len_mean[valid_mask] = item_len_sum[valid_mask] / item_pos_cnt[valid_mask]
 
+    # Session distribution factor: complementary favors position gaps, substitute favors similar positions/lengths.
     def session_dist_factor(i, j, mode):
         if item_pos_cnt[i] <= 0 or item_pos_cnt[j] <= 0:
             return 1.0
@@ -545,6 +546,7 @@ def data_item_hypergraph_comp_sub(
         sim = float(np.exp(-(pos_gap + len_gap)))
         return float(np.clip(0.9 + 0.5 * sim, 0.7, 1.4))
 
+    # Co-buy boost: amplify complementary pairs with consistent session co-occurrence.
     def co_buy_boost(i, j):
         co = co_buy_adj.get(i, {}).get(j, 0.0)
         if co <= 0.0:

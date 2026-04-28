@@ -133,9 +133,9 @@ def main():
     test_path = os.path.join(dataset_dir, 'test.txt')
     all_train_path = os.path.join(dataset_dir, 'all_train_seq.txt')
 
-    train_data, train_src = load_pickle_with_fallback(train_path, [all_train_path, test_path])
-    test_data, test_src = load_pickle_with_fallback(test_path, [train_path])
-    all_train, all_train_src = load_pickle_with_fallback(all_train_path, [train_path, test_path])
+    train_data, train_src = load_pickle_with_fallback(train_path, [all_train_path])
+    test_data, test_src = load_pickle_with_fallback(test_path)
+    all_train, all_train_src = load_pickle_with_fallback(all_train_path, [train_path])
 
     if train_src != train_path:
         logging.warning(f"训练数据缺失，使用替代文件: {train_src}")
