@@ -437,9 +437,9 @@ def data_item_hypergraph_comp_sub(
     comp_adj = dict()
     sub_adj = dict()
     item_freq = np.zeros(n_node, dtype=np.float32)
-    item_pos_sum = np.zeros(n_node, dtype=np.float32)
-    item_len_sum = np.zeros(n_node, dtype=np.float32)
-    item_pos_cnt = np.zeros(n_node, dtype=np.float32)
+    item_position_sum = np.zeros(n_node, dtype=np.float32)
+    item_session_length_sum = np.zeros(n_node, dtype=np.float32)
+    item_position_count = np.zeros(n_node, dtype=np.float32)
     max_sess_len = 0.0
     prev_to_next = dict()
     next_to_prev = dict()
@@ -459,9 +459,9 @@ def data_item_hypergraph_comp_sub(
         for pos, item_id in enumerate(seq):
             item_freq[item_id] += 1.0
             pos_norm = pos / float(max(seq_len - 1, 1))
-            item_pos_sum[item_id] += pos_norm
-            item_len_sum[item_id] += seq_len
-            item_pos_cnt[item_id] += 1.0
+            item_position_sum[item_id] += pos_norm
+            item_session_length_sum[item_id] += seq_len
+            item_position_count[item_id] += 1.0
         if len(seq) <= 1:
             continue
         uniq = list(dict.fromkeys(seq))
@@ -529,22 +529,39 @@ def data_item_hypergraph_comp_sub(
         return 1.0 / (1.0 + sub_co_buy_suppress * norm_co)
 
     max_sess_len = max(max_sess_len, 1.0)
+    comp_pos_base = 0.9
+    comp_pos_gap_weight = 0.4
+    comp_len_sim_weight = 0.2
+    comp_factor_min = 0.7
+    comp_factor_max = 1.4
+    sub_pos_base = 0.9
+    sub_sim_weight = 0.5
+    sub_factor_min = 0.7
+    sub_factor_max = 1.4
+    co_buy_boost_scale = 0.5
+
     pos_mean = np.zeros(n_node, dtype=np.float32)
     len_mean = np.zeros(n_node, dtype=np.float32)
-    valid_mask = item_pos_cnt > 0
-    pos_mean[valid_mask] = item_pos_sum[valid_mask] / item_pos_cnt[valid_mask]
-    len_mean[valid_mask] = item_len_sum[valid_mask] / item_pos_cnt[valid_mask]
+    valid_mask = item_position_count > 0
+    pos_mean[valid_mask] = item_position_sum[valid_mask] / item_position_count[valid_mask]
+    len_mean[valid_mask] = item_session_length_sum[valid_mask] / item_position_count[valid_mask]
 
     # Session distribution factor: complementary favors position gaps, substitute favors similar positions/lengths.
     def session_dist_factor(i, j, mode):
-        if item_pos_cnt[i] <= 0 or item_pos_cnt[j] <= 0:
+        if item_position_count[i] <= 0 or item_position_count[j] <= 0:
             return 1.0
         pos_gap = abs(pos_mean[i] - pos_mean[j])
         len_gap = abs(len_mean[i] - len_mean[j]) / (max_sess_len + EPSILON)
         if mode == 'comp':
-            return float(np.clip(0.9 + 0.4 * pos_gap + 0.2 * (1.0 - len_gap), 0.7, 1.4))
+            return float(np.clip(
+                comp_pos_base + comp_pos_gap_weight * pos_gap + comp_len_sim_weight * (1.0 - len_gap),
+                comp_factor_min, comp_factor_max
+            ))
         sim = float(np.exp(-(pos_gap + len_gap)))
-        return float(np.clip(0.9 + 0.5 * sim, 0.7, 1.4))
+        return float(np.clip(
+            sub_pos_base + sub_sim_weight * sim,
+            sub_factor_min, sub_factor_max
+        ))
 
     # Co-buy boost: amplify complementary pairs with consistent session co-occurrence.
     def co_buy_boost(i, j):
@@ -556,7 +573,7 @@ def data_item_hypergraph_comp_sub(
         if fi <= 0.0 or fj <= 0.0:
             return 1.0
         norm_co = _pair_norm_strength(co, fi, fj)
-        return float(1.0 + 0.5 * np.tanh(norm_co))
+        return float(1.0 + co_buy_boost_scale * np.tanh(norm_co))
 
     # substitute: different items competing under same previous context
     for _, nxt_dict in prev_to_next.items():

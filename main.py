@@ -5,6 +5,7 @@ import os
 import argparse
 import pickle
 import logging
+import numpy as np
 from datetime import datetime
 # 设置日志
 def setup_logging():
@@ -47,6 +48,18 @@ def load_pickle_with_fallback(primary_path, fallback_paths=()):
             with open(path, 'rb') as f:
                 return pickle.load(f), path
     raise FileNotFoundError(f"Missing dataset file. Tried: {', '.join(tried)}")
+
+def derive_all_train_from_train(train_data):
+    def is_sequence_of_sequences(value):
+        return isinstance(value, (list, np.ndarray)) and len(value) > 0 and isinstance(value[0], (list, np.ndarray))
+
+    if isinstance(train_data, (list, tuple)):
+        if len(train_data) >= 3:
+            return [train_data[0], train_data[1]]
+        if len(train_data) == 2:
+            items, second = train_data
+            return [items, second] if is_sequence_of_sequences(second) else items
+    return train_data
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', default='Tmall', help='dataset name: retailrocket/diginetica/Nowplaying/sample')
 parser.add_argument('--epoch', type=int, default=20, help='number of epochs to train for')
@@ -133,16 +146,21 @@ def main():
     test_path = os.path.join(dataset_dir, 'test.txt')
     all_train_path = os.path.join(dataset_dir, 'all_train_seq.txt')
 
-    train_data, train_src = load_pickle_with_fallback(train_path, [all_train_path])
+    train_data, train_src = load_pickle_with_fallback(train_path)
     test_data, test_src = load_pickle_with_fallback(test_path)
-    all_train, all_train_src = load_pickle_with_fallback(all_train_path, [train_path])
+    if os.path.exists(all_train_path):
+        all_train, all_train_src = load_pickle_with_fallback(all_train_path)
+    else:
+        all_train = derive_all_train_from_train(train_data)
+        all_train_src = train_src
+        logging.warning(f"全量训练序列缺失，已从训练数据构造: {all_train_src}")
 
     if train_src != train_path:
         logging.warning(f"训练数据缺失，使用替代文件: {train_src}")
     if test_src != test_path:
         logging.warning(f"测试数据缺失，使用替代文件: {test_src}")
     if all_train_src != all_train_path:
-        logging.warning(f"全量训练序列缺失，使用替代文件: {all_train_src}")
+        logging.warning(f"全量训练序列来源: {all_train_src}")
 
     if dataset_key == 'tmall':
         n_node = 40727
