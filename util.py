@@ -28,6 +28,10 @@ def _safe_get_event(events, idx):
         return 1
     return events[idx]
 
+def _event_pair_weight(e_i, e_j):
+    strength = (_event_strength(e_i) + _event_strength(e_j)) / 2.0
+    return float(np.clip(0.8 + 0.4 * (strength / 2.0), 0.6, 1.2))
+
 def _relation_fuzzy_weight(freq, pos_i, sess_len, e_i, e_j, relation='r1', repeat_ratio=0.0, dataset='Tmall'):
     # Tmall数据集特定参数
     if dataset == 'Tmall':
@@ -368,10 +372,28 @@ def _incidence_to_hypergraph_propagation(H, n_node):
 def _pair_norm_strength(weight, src_freq, dst_freq):
     return float(weight / np.sqrt(src_freq * dst_freq + EPSILON))
 
+def _session_distribution_weight(pair_sessions, src_sessions, dst_sessions, total_sessions):
+    if pair_sessions <= 0 or src_sessions <= 0 or dst_sessions <= 0 or total_sessions <= 0:
+        return 1.0
+    norm = pair_sessions / (np.sqrt(src_sessions * dst_sessions) + EPSILON)
+    coverage = pair_sessions / max(total_sessions, 1.0)
+    weight = 0.6 + 0.35 * np.tanh(norm) + 0.15 * coverage
+    return float(np.clip(weight, 0.5, 1.4))
+
+def _order_relation_weight(gap_sum, gap_count, max_gap):
+    if gap_count <= 0:
+        return 1.0
+    avg_gap = max(gap_sum / gap_count, 1.0)
+    rel = 1.0 / avg_gap
+    weight = 0.7 + 0.6 * rel
+    return float(np.clip(weight, 0.6, 1.3))
+
 
 def _score_relation_graph(
         rel_adj, item_freq, min_support=1.0, min_norm_weight=0.02,
-        head_quantile=0.8, head_scale=1.15, tail_scale=0.85):
+        head_quantile=0.8, head_scale=1.15, tail_scale=0.85,
+        pair_sessions=None, item_sess_freq=None, total_sessions=None,
+        pair_gap_stats=None, max_gap=None):
     if head_quantile < 0.0 or head_quantile > 1.0:
         raise ValueError(f"head_quantile must be in [0,1], got {head_quantile}")
     if head_scale <= 0.0 or tail_scale <= 0.0:
@@ -403,9 +425,22 @@ def _score_relation_graph(
             support = float(np.log1p(weight))
             norm_strength = _pair_norm_strength(weight, src_freq, dst_freq)
             confidence = float(weight / (src_freq + EPSILON))
+            sess_weight = 1.0
+            if pair_sessions is not None and item_sess_freq is not None and total_sessions is not None:
+                pair_sess = pair_sessions.get(src, {}).get(dst, 0.0)
+                if pair_sess > 0:
+                    src_sess = float(item_sess_freq[src])
+                    dst_sess = float(item_sess_freq[dst])
+                    sess_weight = _session_distribution_weight(pair_sess, src_sess, dst_sess, total_sessions)
+            order_weight = 1.0
+            if pair_gap_stats is not None and max_gap is not None:
+                gap_entry = pair_gap_stats.get(src, {}).get(dst)
+                if gap_entry is not None:
+                    gap_sum, gap_count = gap_entry
+                    order_weight = _order_relation_weight(gap_sum, gap_count, max_gap)
             # support captures relation evidence quantity; norm_strength removes popularity bias;
             # confidence captures directional likelihood p(dst|src).
-            score = support * norm_strength * np.sqrt(max(confidence, 0.0) + EPSILON)
+            score = support * norm_strength * np.sqrt(max(confidence, 0.0) + EPSILON) * sess_weight * order_weight
             if score < local_threshold:
                 continue
             if src not in normalized:
@@ -419,12 +454,14 @@ def data_item_hypergraph_comp_sub(
         min_support=1.0, min_norm_weight=0.02, sub_context_topk=20, sub_context_min=2,
         comp_symmetric=True, sub_co_buy_suppress=0.6,
         comp_head_quantile=0.8, comp_head_scale=1.15, comp_tail_scale=0.85,
-        sub_head_quantile=0.8, sub_head_scale=1.15, sub_tail_scale=0.85):
+        sub_head_quantile=0.8, sub_head_scale=1.15, sub_tail_scale=0.85,
+        all_events=None):
     """
     Build item-view hypergraph relations learned from sessions.
 
     Args:
         all_sessions: list of session item sequences.
+        all_events: optional list of aligned event sequences for behavior-aware weighting.
         n_node: total number of items.
         max_gap: maximum distance window for complementary relation extraction.
 
@@ -436,22 +473,36 @@ def data_item_hypergraph_comp_sub(
     comp_adj = dict()
     sub_adj = dict()
     item_freq = np.zeros(n_node, dtype=np.float32)
+    item_sess_freq = np.zeros(n_node, dtype=np.float32)
+    total_sessions = 0.0
     prev_to_next = dict()
     next_to_prev = dict()
     co_buy_adj = dict()
+    comp_gap_stats = dict()
+    sub_sess_adj = dict()
     dist_weights = [1.0 / d for d in range(1, max_gap + 1)]
 
     def context_pair_weight(count_a, count_b):
         return (count_a * count_b) / (count_a + count_b + EPSILON)
 
-    for sess in all_sessions:
+    for s_idx, sess in enumerate(all_sessions):
+        events = all_events[s_idx] if all_events is not None and s_idx < len(all_events) else None
         # convert 1-indexed item ids to 0-indexed graph ids; skip padding/out-of-range ids
-        seq = [x - 1 for x in sess if x != 0 and 1 <= x <= n_node]
+        seq = []
+        seq_events = []
+        for pos, x in enumerate(sess):
+            if x != 0 and 1 <= x <= n_node:
+                seq.append(x - 1)
+                if events is not None:
+                    seq_events.append(_safe_get_event(events, pos))
         if len(seq) <= 1:
             continue
+        total_sessions += 1.0
         for item_id in seq:
             item_freq[item_id] += 1.0
         uniq = list(dict.fromkeys(seq))
+        for item_id in uniq:
+            item_sess_freq[item_id] += 1.0
         for i in range(len(uniq)):
             a = uniq[i]
             if a not in co_buy_adj:
@@ -471,19 +522,39 @@ def data_item_hypergraph_comp_sub(
                 dst = seq[j]
                 if src == dst:
                     continue
-                w = dist_weights[j - i - 1]
+                gap = j - i
+                w = dist_weights[gap - 1]
+                if seq_events:
+                    w *= _event_pair_weight(seq_events[i], seq_events[j])
                 if src not in comp_adj:
                     comp_adj[src] = dict()
                 comp_adj[src][dst] = comp_adj[src].get(dst, 0.0) + w
+                if src not in comp_gap_stats:
+                    comp_gap_stats[src] = dict()
+                if dst not in comp_gap_stats[src]:
+                    comp_gap_stats[src][dst] = [0.0, 0.0]
+                comp_gap_stats[src][dst][0] += gap
+                comp_gap_stats[src][dst][1] += 1.0
                 if comp_symmetric:
                     if dst not in comp_adj:
                         comp_adj[dst] = dict()
                     comp_adj[dst][src] = comp_adj[dst].get(src, 0.0) + w
+                    if dst not in comp_gap_stats:
+                        comp_gap_stats[dst] = dict()
+                    if src not in comp_gap_stats[dst]:
+                        comp_gap_stats[dst][src] = [0.0, 0.0]
+                    comp_gap_stats[dst][src][0] += gap
+                    comp_gap_stats[dst][src][1] += 1.0
 
         # contexts for substitute learning
+        session_prev = dict()
+        session_next = dict()
         for i in range(len(seq) - 1):
             p = seq[i]
             n = seq[i + 1]
+            pair_weight = 1.0
+            if seq_events:
+                pair_weight = _event_pair_weight(seq_events[i], seq_events[i + 1])
             if p not in prev_to_next:
                 prev_to_next[p] = dict()
             if n not in next_to_prev:
@@ -492,8 +563,39 @@ def data_item_hypergraph_comp_sub(
                 prev_to_next[p][n] = 0.0
             if p not in next_to_prev[n]:
                 next_to_prev[n][p] = 0.0
-            prev_to_next[p][n] += 1.0
-            next_to_prev[n][p] += 1.0
+            prev_to_next[p][n] += pair_weight
+            next_to_prev[n][p] += pair_weight
+            if p not in session_prev:
+                session_prev[p] = set()
+            if n not in session_next:
+                session_next[n] = set()
+            session_prev[p].add(n)
+            session_next[n].add(p)
+        session_pairs = set()
+        for items in session_prev.values():
+            if len(items) < 2:
+                continue
+            items = list(items)
+            for a in range(len(items)):
+                ia = items[a]
+                for b in range(a + 1, len(items)):
+                    ib = items[b]
+                    session_pairs.add((ia, ib))
+                    session_pairs.add((ib, ia))
+        for items in session_next.values():
+            if len(items) < 2:
+                continue
+            items = list(items)
+            for a in range(len(items)):
+                ia = items[a]
+                for b in range(a + 1, len(items)):
+                    ib = items[b]
+                    session_pairs.add((ia, ib))
+                    session_pairs.add((ib, ia))
+        for ia, ib in session_pairs:
+            if ia not in sub_sess_adj:
+                sub_sess_adj[ia] = dict()
+            sub_sess_adj[ia][ib] = sub_sess_adj[ia].get(ib, 0.0) + 1.0
 
     def add_sub_pair(i, j, w):
         if i == j:
@@ -551,11 +653,14 @@ def data_item_hypergraph_comp_sub(
 
     comp_adj = _score_relation_graph(
         comp_adj, item_freq, min_support=min_support, min_norm_weight=min_norm_weight,
-        head_quantile=comp_head_quantile, head_scale=comp_head_scale, tail_scale=comp_tail_scale
+        head_quantile=comp_head_quantile, head_scale=comp_head_scale, tail_scale=comp_tail_scale,
+        pair_sessions=co_buy_adj, item_sess_freq=item_sess_freq, total_sessions=total_sessions,
+        pair_gap_stats=comp_gap_stats, max_gap=max_gap
     )
     sub_adj = _score_relation_graph(
         sub_adj, item_freq, min_support=min_support, min_norm_weight=min_norm_weight,
-        head_quantile=sub_head_quantile, head_scale=sub_head_scale, tail_scale=sub_tail_scale
+        head_quantile=sub_head_quantile, head_scale=sub_head_scale, tail_scale=sub_tail_scale,
+        pair_sessions=sub_sess_adj, item_sess_freq=item_sess_freq, total_sessions=total_sessions
     )
 
     comp_anchor_conf = {}
@@ -630,6 +735,11 @@ class Data():
                 'sub_head_scale': sub_head_scale,
                 'sub_tail_scale': sub_tail_scale
             }
+            graph_sig_cfg = {
+                'n_node': n_node,
+                **graph_cfg,
+                'use_events': all_train_events is not None
+            }
 
             comp_adj = sub_adj = comp_hyper = sub_hyper = None
             cache_loaded = False
@@ -638,7 +748,7 @@ class Data():
                     cache_dir = comp_sub_cache_dir if comp_sub_cache_dir else os.path.join('datasets', 'graph_cache')
                     os.makedirs(cache_dir, exist_ok=True)
                     prefix = cache_prefix if cache_prefix else 'graph'
-                    sig = hashlib.sha256(json.dumps({'n_node': n_node, **graph_cfg}, sort_keys=True).encode('utf-8')).hexdigest()[:32]
+                    sig = hashlib.sha256(json.dumps(graph_sig_cfg, sort_keys=True).encode('utf-8')).hexdigest()[:32]
                     cache_file = os.path.join(cache_dir, f'{prefix}_comp_sub_{sig}.pkl')
                     if os.path.exists(cache_file):
                         with open(cache_file, 'rb') as f:
@@ -650,7 +760,7 @@ class Data():
 
             if not cache_loaded:
                 comp_adj, sub_adj, comp_hyper, sub_hyper = data_item_hypergraph_comp_sub(
-                    all_train_items, n_node, **graph_cfg
+                    all_train_items, n_node, all_events=all_train_events, **graph_cfg
                 )
                 if comp_sub_cache:
                     try:
