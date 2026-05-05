@@ -198,6 +198,8 @@ class MDHG(Module):
         self.short_len_factor_min = short_len_factor_min
         self.topk_hardneg = 100
         self.score_temperature = 0.85
+        self.contrastive_temperature = 0.20
+        self.contrastive_dropout = nn.Dropout(p=min(0.5, max(0.1, dropout)))
 
         # item-view complementary/substitute fusion weights
         self.comp_weight_base = 0.60
@@ -324,6 +326,37 @@ class MDHG(Module):
     def fuse_session_views(self, s1, s2, s3, gate):
         gate = gate / (gate.sum(dim=1, keepdim=True) + 1e-8)
         return gate[:, 0:1] * s1 + gate[:, 1:2] * s2 + gate[:, 2:3] * s3
+
+    def augment_contrastive_view(self, representation):
+        return self.contrastive_dropout(representation)
+
+    def contrastive_info_nce(self, view_a, view_b):
+        view_a = F.normalize(view_a, dim=-1)
+        view_b = F.normalize(view_b, dim=-1)
+        logits = torch.matmul(view_a, view_b.t()) / self.contrastive_temperature
+        labels = torch.arange(view_a.size(0), device=view_a.device)
+        loss_ab = F.cross_entropy(logits, labels)
+        loss_ba = F.cross_entropy(logits.t(), labels)
+        return (loss_ab + loss_ba) / 2.0
+
+    def build_session_item_rep(self, item_embeddings, session_item):
+        item_idx = torch.clamp(session_item - 1, min=0, max=self.n_node - 1)
+        mask = (session_item > 0).float().unsqueeze(-1)
+        item_vec = item_embeddings[item_idx] * mask
+        denom = mask.sum(dim=1).clamp(min=1.0)
+        return item_vec.sum(dim=1) / denom
+
+    def hierarchical_contrastive_loss(self, item_rep, session_rep, intent_rep):
+        item_view_a = self.augment_contrastive_view(item_rep)
+        item_view_b = self.augment_contrastive_view(item_rep)
+        session_view_a = self.augment_contrastive_view(session_rep)
+        session_view_b = self.augment_contrastive_view(session_rep)
+        intent_view_a = self.augment_contrastive_view(intent_rep)
+        intent_view_b = self.augment_contrastive_view(intent_rep)
+        item_loss = self.contrastive_info_nce(item_view_a, item_view_b)
+        session_loss = self.contrastive_info_nce(session_view_a, session_view_b)
+        intent_loss = self.contrastive_info_nce(intent_view_a, intent_view_b)
+        return (item_loss + session_loss + intent_loss) / 3.0
 
     def ce_with_label_smoothing(self, logits, target, smooth=0.0):
         n_class = logits.size(1)
@@ -532,6 +565,7 @@ class MDHG(Module):
         short_gate = self.short_intent_min + (self.short_intent_max - self.short_intent_min) * short_gate * len_factor
         short_gate = short_gate * valid_last.float().unsqueeze(1)
         sf = (1.0 - short_gate) * sf + short_gate * last_item_emb
+        sf_intent = sf
 
         if train:
             sf = self.final_dropout(sf)
@@ -539,6 +573,7 @@ class MDHG(Module):
         sf_norm = F.normalize(sf, dim=-1)
         sf = self.w_k * sf_norm
         item_mix = F.normalize(item_mix, dim=-1)
+        item_rep = self.build_session_item_rep(item_mix, session_item)
         scores_item = torch.mm(sf, item_mix.t())
 
         # temperature scaling for better ranking sharpness
@@ -556,7 +591,11 @@ class MDHG(Module):
         loss_item = ce_loss + self.bpr_loss_weight * bpr_loss + self.intent_align_weight * intent_align_loss
         if train:
             loss_item = loss_item + self.comp_sub_decouple_weight * comp_sub_decouple_loss
-        con_loss = torch.tensor(0.0, device=scores_item.device)
+        if train:
+            contrastive_loss = self.hierarchical_contrastive_loss(item_rep, sf_base, sf_intent)
+            con_loss = self.intent_align_weight * contrastive_loss
+        else:
+            con_loss = torch.tensor(0.0, device=scores_item.device)
 
         if train:
             fuzzy_raw = self.compute_fuzzy_losses(scores_item, tar, s1, s2, s3, sf, gate)
