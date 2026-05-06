@@ -120,6 +120,8 @@ def main():
         n_node =43097
     elif opt.dataset == 'Nowplaying':
         n_node = 60416
+    elif opt.dataset == 'reddit':
+        n_node = 27453
     else:
         n_node = 309
     logging.info(f"数据集: {opt.dataset}, 节点数: {n_node}")
