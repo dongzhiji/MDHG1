@@ -424,6 +424,8 @@ class MDHG(Module):
             if batch_items.numel() > self.max_item_cl_samples:
                 perm = torch.randperm(batch_items.numel(), device=batch_items.device)[:self.max_item_cl_samples]
                 batch_items = batch_items[perm]
+            # Item IDs are 1-indexed; embedding tables are 0-indexed.
+            # Items with ID 0 (padding) are already excluded above.
             bi = torch.clamp(batch_items - 1, min=0, max=i1.size(0) - 1)
             i1_b, i2_b, i3_b = i1[bi], i2[bi], i3[bi]
             item_cl = (
@@ -437,6 +439,8 @@ class MDHG(Module):
         # --- Level 2: Session-level (dropout augmentation) ---
         # Two independent dropout masks on the same sf_base produce a reliable
         # positive pair without conflating the three graph views.
+        # NOTE: this method is only called inside the `if train:` block in forward,
+        # so the model is always in training mode here and aug_dropout is active.
         sf_aug1 = self.aug_dropout(sf_base)
         sf_aug2 = self.aug_dropout(sf_base)
         sess_cl = self.info_nce_loss(sf_aug1, sf_aug2, self.sess_cl_temp)
