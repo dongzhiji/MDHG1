@@ -104,7 +104,9 @@ class MDHG(Module):
                  K1, K2, K3, dropout, alpha, emb_size=100, batch_size=100,
                  intent_align_weight=0.03, short_intent_min=0.10, short_intent_max=0.45,
                  short_len_factor_min=0.35, comp_sub_pair_hyper_mix=0.5, comp_sub_decouple_weight=0.02,
-                 view_pred_weight=0.05):
+                 item_cl_weight=0.01, sess_cl_weight=0.05, intent_item_cl_weight=0.05,
+                 item_cl_temp=0.07, sess_cl_temp=0.10, intent_item_temp=0.07,
+                 cl_aug_dropout=0.30, max_item_cl_samples=512):
         super(MDHG, self).__init__()
         self.emb_size = emb_size
         self.batch_size = batch_size
@@ -200,8 +202,15 @@ class MDHG(Module):
         self.topk_hardneg = 100
         self.score_temperature = 0.85
 
-        # multi-view direct prediction weight
-        self.view_pred_weight = view_pred_weight
+        # three-level contrastive learning
+        self.item_cl_weight = item_cl_weight
+        self.sess_cl_weight = sess_cl_weight
+        self.intent_item_cl_weight = intent_item_cl_weight
+        self.item_cl_temp = item_cl_temp
+        self.sess_cl_temp = sess_cl_temp
+        self.intent_item_temp = intent_item_temp
+        self.max_item_cl_samples = max_item_cl_samples
+        self.aug_dropout = nn.Dropout(p=cl_aug_dropout)
 
         # item-view complementary/substitute fusion weights
         self.comp_weight_base = 0.60
@@ -352,34 +361,96 @@ class MDHG(Module):
         sampled_neg = hard_vals[torch.arange(B, device=logits.device), rand_col]
         return -torch.log(torch.sigmoid(pos - sampled_neg) + 1e-8).mean()
 
-    def compute_multiview_pred_loss(self, s1, s2, s3, i1, i2, i3, tar_safe):
-        """Per-view direct recommendation loss.
+    def info_nce_loss(self, z1, z2, temperature=0.07):
+        """Symmetric InfoNCE loss with in-batch negatives.
 
-        Each session view (s1, s2, s3) independently scores all items using its
-        own item embedding table (i1, i2, i3) and is evaluated with standard CE
-        loss against the same target.  This gives each view direct, task-relevant
-        gradient without requiring any cross-view contrast (which introduces false
-        negatives in session-based recommendation because multiple sessions in a
-        batch often share the same or similar target items).
-
-        Using the view's own item table (i_k) rather than the shared item_mix
-        preserves the diversity between views: each view still specialises in a
-        different relational structure (sequential, transitional, co-purchase).
+        Positive pairs are (z1[i], z2[i]); all other cross-sample pairs
+        within the batch serve as negatives. Loss is averaged over both
+        directions for symmetry.
 
         Args:
-            s1, s2, s3: session embeddings [B, D] from each graph-conv view.
-            i1, i2, i3: item embedding tables [n_node, D] from each view.
-            tar_safe:    target item indices [B], clamped to valid range.
+            z1, z2:      [B, D] embedding tensors (will be L2-normalised).
+            temperature: softmax temperature.
         Returns:
-            Scalar average CE loss across the three views.
+            Scalar loss tensor.
         """
-        def _view_ce(s, i_table):
-            s_n = F.normalize(s, dim=-1)
-            i_n = F.normalize(i_table, dim=-1)
-            scores = self.w_k * torch.mm(s_n, i_n.t()) / self.score_temperature
-            return F.cross_entropy(scores, tar_safe)
+        z1 = F.normalize(z1, dim=-1)
+        z2 = F.normalize(z2, dim=-1)
+        B = z1.size(0)
+        if B <= 1:
+            return torch.tensor(0.0, device=z1.device)
+        sim = torch.mm(z1, z2.t()) / temperature
+        labels = torch.arange(B, device=z1.device)
+        return (F.cross_entropy(sim, labels) + F.cross_entropy(sim.t(), labels)) / 2.0
 
-        return (_view_ce(s1, i1) + _view_ce(s2, i2) + _view_ce(s3, i3)) / 3.0
+    def compute_tripl_cl_loss(self, i1, i2, i3, sf_base, item_mix, tar_safe, session_item):
+        """Three-level contrastive learning loss.
+
+        Level 1 – Item-level contrast:
+            Positive pairs: same item id sampled from the batch, but taken from
+            two different graph-conv views (i1/i2, i1/i3, i2/i3).
+            Negative pairs: different items within the same subsample.
+            Encourages view-consistent item representations while preserving
+            inter-item discrimination.
+
+        Level 2 – Session-level contrast (dropout augmentation):
+            Generate two independent dropout-augmented versions of the fused
+            session embedding sf_base.  These form positive pairs; other
+            sessions in the batch serve as negatives.
+            Uses augmentation within the same representational space, so view
+            diversity is *not* destroyed.
+
+        Level 3 – Intent-Item alignment (InfoNCE):
+            Query:    fused session intent embedding sf_base.
+            Key+:     target item embedding item_mix[tar_safe[i]] for same i.
+            Key-:     target item embeddings of all other sessions in the batch.
+            Pulls each session's intent toward its target item and repels it
+            from other targets — a discriminative version of cosine alignment.
+
+        Args:
+            i1, i2, i3:   item embedding tables [n_node, D] from each view.
+            sf_base:      pre-short-gate fused session embedding [B, D].
+            item_mix:     shared normalised item embedding table [n_node, D].
+            tar_safe:     target item indices [B], clamped to valid range.
+            session_item: [B, T] integer tensor of item IDs in each session.
+        Returns:
+            Scalar weighted sum of the three contrastive losses.
+        """
+        # --- Level 1: Item-level ---
+        flat_items = session_item.reshape(-1)
+        batch_items = torch.unique(flat_items)
+        batch_items = batch_items[batch_items > 0]
+        if batch_items.numel() > 1:
+            if batch_items.numel() > self.max_item_cl_samples:
+                perm = torch.randperm(batch_items.numel(), device=batch_items.device)[:self.max_item_cl_samples]
+                batch_items = batch_items[perm]
+            bi = torch.clamp(batch_items - 1, min=0, max=i1.size(0) - 1)
+            i1_b, i2_b, i3_b = i1[bi], i2[bi], i3[bi]
+            item_cl = (
+                self.info_nce_loss(i1_b, i2_b, self.item_cl_temp) +
+                self.info_nce_loss(i1_b, i3_b, self.item_cl_temp) +
+                self.info_nce_loss(i2_b, i3_b, self.item_cl_temp)
+            ) / 3.0
+        else:
+            item_cl = torch.tensor(0.0, device=sf_base.device)
+
+        # --- Level 2: Session-level (dropout augmentation) ---
+        # Two independent dropout masks on the same sf_base produce a reliable
+        # positive pair without conflating the three graph views.
+        sf_aug1 = self.aug_dropout(sf_base)
+        sf_aug2 = self.aug_dropout(sf_base)
+        sess_cl = self.info_nce_loss(sf_aug1, sf_aug2, self.sess_cl_temp)
+
+        # --- Level 3: Intent-Item alignment ---
+        # item_mix is already L2-normalised; info_nce_loss will normalise sf_base.
+        target_embs = item_mix[tar_safe]  # [B, D]
+        intent_item_cl = self.info_nce_loss(sf_base, target_embs, self.intent_item_temp)
+
+        return (
+            self.item_cl_weight * item_cl +
+            self.sess_cl_weight * sess_cl +
+            self.intent_item_cl_weight * intent_item_cl
+        )
 
     def generate_sess_emb(self, item_embedding, event_embedding, session_item, session_len, reversed_sess_item,
                           reversed_sess_event, mask):
@@ -590,12 +661,11 @@ class MDHG(Module):
         if train:
             loss_item = loss_item + self.comp_sub_decouple_weight * comp_sub_decouple_loss
 
-        # Per-view direct prediction loss: each view independently scores items
-        # using its own item table, giving direct task-relevant gradient to all
-        # three graph-conv branches without cross-view false negatives.
+        # Three-level contrastive learning:
+        #  L1 item-view contrast, L2 session-dropout augmentation, L3 intent-item InfoNCE
         if train:
-            con_loss = self.view_pred_weight * self.compute_multiview_pred_loss(
-                s1, s2, s3, i1, i2, i3, tar_safe
+            con_loss = self.compute_tripl_cl_loss(
+                i1, i2, i3, sf_base, item_mix, tar_safe, session_item
             )
         else:
             con_loss = torch.tensor(0.0, device=scores_item.device)
