@@ -105,7 +105,7 @@ class MDHG(Module):
                  intent_align_weight=0.03, short_intent_min=0.10, short_intent_max=0.45,
                  short_len_factor_min=0.35, comp_sub_pair_hyper_mix=0.5, comp_sub_decouple_weight=0.02,
                  cl_temperature=0.10, item_cl_weight=0.01, sess_cl_weight=0.02,
-                 intent_cl_weight=0.02, cl_aug_dropout=0.30):
+                 intent_cl_weight=0.02, cl_aug_dropout=0.30, max_item_cl_samples=512):
         super(MDHG, self).__init__()
         self.emb_size = emb_size
         self.batch_size = batch_size
@@ -206,6 +206,7 @@ class MDHG(Module):
         self.item_cl_weight = item_cl_weight
         self.sess_cl_weight = sess_cl_weight
         self.intent_cl_weight = intent_cl_weight
+        self.max_item_cl_samples = max_item_cl_samples
         self.aug_dropout = nn.Dropout(p=cl_aug_dropout)
 
         # item-view complementary/substitute fusion weights
@@ -407,9 +408,8 @@ class MDHG(Module):
         batch_items = batch_items[batch_items > 0]  # remove padding (id=0)
         if batch_items.numel() > 1:
             # Subsample to keep the similarity matrix tractable.
-            max_item_cl = 512
-            if batch_items.numel() > max_item_cl:
-                perm = torch.randperm(batch_items.numel(), device=batch_items.device)[:max_item_cl]
+            if batch_items.numel() > self.max_item_cl_samples:
+                perm = torch.randperm(batch_items.numel(), device=batch_items.device)[:self.max_item_cl_samples]
                 batch_items = batch_items[perm]
             # Item IDs are 1-indexed; embedding tables are 0-indexed.
             bi = torch.clamp(batch_items - 1, min=0, max=i1.size(0) - 1)
@@ -430,7 +430,8 @@ class MDHG(Module):
         ) / 3.0
 
         # --- Level 3: intent-level ---
-        # Two independent dropout masks produce two augmented views of sf.
+        # PyTorch Dropout generates a new random mask on every forward call, so
+        # these two passes produce genuinely independent augmented views of sf.
         sf_aug1 = self.aug_dropout(sf)
         sf_aug2 = self.aug_dropout(sf)
         intent_cl = self.info_nce_loss(sf_aug1, sf_aug2)

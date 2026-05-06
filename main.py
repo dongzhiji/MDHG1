@@ -69,6 +69,7 @@ parser.add_argument('--item_cl_weight', type=float, default=0.01, help='weight f
 parser.add_argument('--sess_cl_weight', type=float, default=0.02, help='weight for session-level contrastive loss')
 parser.add_argument('--intent_cl_weight', type=float, default=0.02, help='weight for intent-level contrastive loss')
 parser.add_argument('--cl_aug_dropout', type=float, default=0.30, help='dropout rate for intent augmentation views in contrastive loss')
+parser.add_argument('--max_item_cl_samples', type=int, default=512, help='max number of unique items sampled for item-level contrastive loss per batch')
 
 opt = parser.parse_args()
 # 设置日志文件
@@ -207,6 +208,7 @@ def main():
         sess_cl_weight=opt.sess_cl_weight,
         intent_cl_weight=opt.intent_cl_weight,
         cl_aug_dropout=opt.cl_aug_dropout,
+        max_item_cl_samples=opt.max_item_cl_samples,
     ))
 
     #reset_parameters(model)
