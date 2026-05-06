@@ -64,12 +64,7 @@ parser.add_argument('--sub_head_scale', type=float, default=1.15, help='threshol
 parser.add_argument('--sub_tail_scale', type=float, default=0.85, help='threshold scale for substitute tail bucket')
 parser.add_argument('--comp_sub_decouple_weight', type=float, default=0.02, help='regularization weight for comp/sub embedding decorrelation')
 parser.add_argument('--amp', type=int, default=0, help='deprecated: AMP is disabled and this flag is ignored')
-parser.add_argument('--cl_temperature', type=float, default=0.10, help='temperature for hierarchical contrastive loss (InfoNCE)')
-parser.add_argument('--item_cl_weight', type=float, default=0.01, help='weight for item-level contrastive loss')
-parser.add_argument('--sess_cl_weight', type=float, default=0.02, help='weight for session-level contrastive loss')
-parser.add_argument('--intent_cl_weight', type=float, default=0.02, help='weight for intent-level contrastive loss')
-parser.add_argument('--cl_aug_dropout', type=float, default=0.30, help='dropout rate for intent augmentation views in contrastive loss')
-parser.add_argument('--max_item_cl_samples', type=int, default=512, help='max number of unique items sampled for item-level contrastive loss per batch')
+parser.add_argument('--view_pred_weight', type=float, default=0.05, help='weight for per-view direct prediction auxiliary loss')
 
 opt = parser.parse_args()
 # 设置日志文件
@@ -203,12 +198,7 @@ def main():
         short_len_factor_min=opt.short_len_factor_min,
         comp_sub_pair_hyper_mix=opt.comp_sub_pair_hyper_mix,
         comp_sub_decouple_weight=opt.comp_sub_decouple_weight,
-        cl_temperature=opt.cl_temperature,
-        item_cl_weight=opt.item_cl_weight,
-        sess_cl_weight=opt.sess_cl_weight,
-        intent_cl_weight=opt.intent_cl_weight,
-        cl_aug_dropout=opt.cl_aug_dropout,
-        max_item_cl_samples=opt.max_item_cl_samples,
+        view_pred_weight=opt.view_pred_weight,
     ))
 
     #reset_parameters(model)
