@@ -45,6 +45,8 @@ parser.add_argument('--short_intent_min', type=float, default=0.10, help='minimu
 parser.add_argument('--short_intent_max', type=float, default=0.45, help='maximum short-term intent fusion gate')
 parser.add_argument('--short_len_factor_min', type=float, default=0.35, help='minimum session-length factor in short-term intent fusion')
 parser.add_argument('--comp_sub_pair_hyper_mix', type=float, default=0.5, help='blend ratio for pairwise vs hypergraph comp/sub embeddings')
+parser.add_argument('--interest_k', type=int, default=3, help='number of interest capsules for multi-interest routing')
+parser.add_argument('--interest_routing', type=int, default=3, help='dynamic routing iterations for interest capsules')
 parser.add_argument('--comp_max_gap', type=int, default=3, help='max sequence distance for complementary relation mining')
 parser.add_argument('--comp_sub_topk', type=int, default=8, help='top-k related items in each comp/sub hyperedge')
 parser.add_argument('--comp_sub_min_neighbors', type=int, default=1, help='minimum neighbors required to form a comp/sub hyperedge')
@@ -196,7 +198,9 @@ def main():
         short_intent_max=opt.short_intent_max,
         short_len_factor_min=opt.short_len_factor_min,
         comp_sub_pair_hyper_mix=opt.comp_sub_pair_hyper_mix,
-        comp_sub_decouple_weight=opt.comp_sub_decouple_weight
+        comp_sub_decouple_weight=opt.comp_sub_decouple_weight,
+        interest_k=opt.interest_k,
+        interest_routing=opt.interest_routing
     ))
 
     #reset_parameters(model)

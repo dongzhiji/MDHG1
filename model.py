@@ -95,6 +95,36 @@ class HyperGraphConv(Module):
             outs.append(F.normalize(x, dim=-1, p=2))
         return torch.sum(torch.stack(outs), 0) / len(outs)
 
+class InterestCapsuleLayer(Module):
+    """Dynamic routing layer that maps session view embeddings into multiple interest capsules."""
+    def __init__(self, emb_size, num_interests=3, routing_iters=3):
+        super(InterestCapsuleLayer, self).__init__()
+        self.emb_size = emb_size
+        self.num_interests = num_interests
+        self.routing_iters = routing_iters
+        self.proj = nn.Linear(self.emb_size, self.num_interests * self.emb_size, bias=False)
+        self.eps = 1e-8
+
+    def squash(self, s):
+        norm_sq = (s ** 2).sum(dim=-1, keepdim=True)
+        scale = norm_sq / (1.0 + norm_sq)
+        return scale * s / torch.sqrt(norm_sq + self.eps)
+
+    def forward(self, inputs):
+        # inputs: [B, V, D]
+        batch_size, num_inputs, _ = inputs.size()
+        u_hat = self.proj(inputs).view(batch_size, num_inputs, self.num_interests, self.emb_size)
+        routing_logits = torch.zeros(
+            batch_size, num_inputs, self.num_interests, device=inputs.device, dtype=inputs.dtype
+        )
+        for i in range(self.routing_iters):
+            coeff = torch.softmax(routing_logits, dim=-1)
+            s = (coeff.unsqueeze(-1) * u_hat).sum(dim=1)
+            v = self.squash(s)
+            if i < self.routing_iters - 1:
+                routing_logits = routing_logits + (u_hat * v.unsqueeze(1)).sum(dim=-1)
+        return v
+
 
 class MDHG(Module):
     def __init__(self, R, adj1, adj2, adjacency, adjacency_T, adjacency1, adjacency_comp, adjacency_sub, hyper_comp, hyper_sub, R1, comp_deg, sub_deg,
@@ -103,7 +133,8 @@ class MDHG(Module):
                  n_node, lr, layers, l2, beta, lam, eps, dataset,
                  K1, K2, K3, dropout, alpha, emb_size=100, batch_size=100,
                  intent_align_weight=0.03, short_intent_min=0.10, short_intent_max=0.45,
-                 short_len_factor_min=0.35, comp_sub_pair_hyper_mix=0.5, comp_sub_decouple_weight=0.02):
+                 short_len_factor_min=0.35, comp_sub_pair_hyper_mix=0.5, comp_sub_decouple_weight=0.02,
+                 interest_k=3, interest_routing=3):
         super(MDHG, self).__init__()
         self.emb_size = emb_size
         self.batch_size = batch_size
@@ -157,6 +188,13 @@ class MDHG(Module):
 
         self.attention = nn.Parameter(torch.Tensor(1, self.emb_size))
         self.attention_mat = nn.Parameter(torch.Tensor(self.emb_size, self.emb_size))
+
+        self.interest_k = interest_k
+        self.interest_routing = interest_routing
+        self.interest_capsule = InterestCapsuleLayer(
+            self.emb_size, num_interests=self.interest_k, routing_iters=self.interest_routing
+        )
+        self.interest_fuse_gate = nn.Linear(self.emb_size * 2, 1)
 
         self.gate_mlp = nn.Sequential(
             nn.Linear(self.emb_size, self.emb_size),
@@ -320,6 +358,15 @@ class MDHG(Module):
         score = torch.softmax(raw_weights, dim=-1)
         mixed = score[:, 0:1] * h1 + score[:, 1:2] * h2 + score[:, 2:3] * h3
         return mixed, score
+
+    def fuse_interest_capsules(self, s1, s2, s3, sf):
+        view_inputs = torch.stack([s1, s2, s3], dim=1)
+        interests = self.interest_capsule(view_inputs)
+        routing_logits = torch.sum(interests * sf.unsqueeze(1), dim=-1)
+        routing_weights = torch.softmax(routing_logits, dim=1)
+        interest_fused = torch.sum(routing_weights.unsqueeze(-1) * interests, dim=1)
+        gate = torch.sigmoid(self.interest_fuse_gate(torch.cat([sf, interest_fused], dim=1)))
+        return gate * sf + (1.0 - gate) * interest_fused
 
     def fuse_session_views(self, s1, s2, s3, gate):
         gate = gate / (gate.sum(dim=1, keepdim=True) + 1e-8)
@@ -516,6 +563,7 @@ class MDHG(Module):
         gate = gate / (gate.sum(dim=1, keepdim=True) + 1e-8)
 
         sf = self.fuse_session_views(s1, s2, s3, gate)
+        sf = self.fuse_interest_capsules(s1, s2, s3, sf)
         sf_base = sf
 
         last_item_ids = reversed_sess_item[:, 0]
