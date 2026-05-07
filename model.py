@@ -117,11 +117,11 @@ class InterestCapsuleLayer(Module):
         routing_logits = torch.zeros(
             batch_size, num_inputs, self.num_interests, device=inputs.device, dtype=inputs.dtype
         )
-        for i in range(self.routing_iters):
+        for routing_iter in range(self.routing_iters):
             coeff = torch.softmax(routing_logits, dim=-1)
             s = (coeff.unsqueeze(-1) * u_hat).sum(dim=1)
             v = self.squash(s)
-            if i < self.routing_iters - 1:
+            if routing_iter < self.routing_iters - 1:
                 routing_logits = routing_logits + (u_hat * v.unsqueeze(1)).sum(dim=-1)
         return v
 
@@ -362,9 +362,9 @@ class MDHG(Module):
     def fuse_interest_capsules(self, s1, s2, s3, sf):
         view_inputs = torch.stack([s1, s2, s3], dim=1)
         interests = self.interest_capsule(view_inputs)
-        routing_logits = torch.sum(interests * sf.unsqueeze(1), dim=-1)
-        routing_weights = torch.softmax(routing_logits, dim=1)
-        interest_fused = torch.sum(routing_weights.unsqueeze(-1) * interests, dim=1)
+        interest_scores = torch.sum(interests * sf.unsqueeze(1), dim=-1)
+        interest_weights = torch.softmax(interest_scores, dim=1)
+        interest_fused = torch.sum(interest_weights.unsqueeze(-1) * interests, dim=1)
         gate = torch.sigmoid(self.interest_fuse_gate(torch.cat([sf, interest_fused], dim=1)))
         return gate * sf + (1.0 - gate) * interest_fused
 
