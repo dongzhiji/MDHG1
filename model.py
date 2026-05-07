@@ -102,7 +102,7 @@ class InterestCapsuleLayer(Module):
         self.emb_size = emb_size
         self.num_interests = num_interests
         self.routing_iters = routing_iters
-        self.proj = nn.Linear(self.emb_size, self.num_interests * self.emb_size, bias=False)
+        self.interest_projection = nn.Linear(self.emb_size, self.num_interests * self.emb_size, bias=False)
         self.eps = 1e-8
 
     def squash(self, s):
@@ -113,15 +113,15 @@ class InterestCapsuleLayer(Module):
     def forward(self, inputs):
         # inputs: [B, V, D]
         batch_size, num_inputs, _ = inputs.size()
-        u_hat = self.proj(inputs).view(batch_size, num_inputs, self.num_interests, self.emb_size)
+        u_hat = self.interest_projection(inputs).view(batch_size, num_inputs, self.num_interests, self.emb_size)
         routing_logits = torch.zeros(
             batch_size, num_inputs, self.num_interests, device=inputs.device, dtype=inputs.dtype
         )
-        for routing_iter in range(self.routing_iters):
+        for iter_idx in range(self.routing_iters):
             coeff = torch.softmax(routing_logits, dim=-1)
             s = (coeff.unsqueeze(-1) * u_hat).sum(dim=1)
             v = self.squash(s)
-            if routing_iter < self.routing_iters - 1:
+            if iter_idx < self.routing_iters - 1:
                 routing_logits = routing_logits + (u_hat * v.unsqueeze(1)).sum(dim=-1)
         return v
 
@@ -362,9 +362,9 @@ class MDHG(Module):
     def fuse_interest_capsules(self, s1, s2, s3, sf):
         view_inputs = torch.stack([s1, s2, s3], dim=1)
         interests = self.interest_capsule(view_inputs)
-        interest_scores = torch.sum(interests * sf.unsqueeze(1), dim=-1)
-        interest_weights = torch.softmax(interest_scores, dim=1)
-        interest_fused = torch.sum(interest_weights.unsqueeze(-1) * interests, dim=1)
+        capsule_relevance_scores = torch.sum(interests * sf.unsqueeze(1), dim=-1)
+        capsule_attention_weights = torch.softmax(capsule_relevance_scores, dim=1)
+        interest_fused = torch.sum(capsule_attention_weights.unsqueeze(-1) * interests, dim=1)
         gate = torch.sigmoid(self.interest_fuse_gate(torch.cat([sf, interest_fused], dim=1)))
         return gate * sf + (1.0 - gate) * interest_fused
 
