@@ -111,17 +111,17 @@ class InterestCapsuleLayer(Module):
         return scale * s / torch.sqrt(norm_sq + self.eps)
 
     def forward(self, inputs):
-        # inputs: [B, V, D]
+        # inputs: [batch_size, num_inputs, emb_size]
         batch_size, num_inputs, _ = inputs.size()
         u_hat = self.interest_projection(inputs).view(batch_size, num_inputs, self.num_interests, self.emb_size)
         routing_logits = torch.zeros(
             batch_size, num_inputs, self.num_interests, device=inputs.device, dtype=inputs.dtype
         )
-        for iter_idx in range(self.routing_iters):
+        for iteration in range(self.routing_iters):
             coeff = torch.softmax(routing_logits, dim=-1)
             s = (coeff.unsqueeze(-1) * u_hat).sum(dim=1)
             v = self.squash(s)
-            if iter_idx < self.routing_iters - 1:
+            if iteration < self.routing_iters - 1:
                 routing_logits = routing_logits + (u_hat * v.unsqueeze(1)).sum(dim=-1)
         return v
 
