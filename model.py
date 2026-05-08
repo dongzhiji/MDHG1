@@ -371,6 +371,7 @@ class MDHG(Module):
         """Fuse routed interest capsules (from s1/s2/s3) into the session representation."""
         view_inputs = torch.stack([s1, s2, s3], dim=1)
         interests = self.interest_capsule(view_inputs)
+        # dot-product similarity between each interest capsule and the session representation
         capsule_relevance_scores = torch.sum(interests * sf.unsqueeze(1), dim=-1)
         capsule_attention_weights = torch.softmax(capsule_relevance_scores, dim=1)
         interest_fused = torch.sum(capsule_attention_weights.unsqueeze(-1) * interests, dim=1)

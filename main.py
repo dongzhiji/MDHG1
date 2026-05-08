@@ -47,7 +47,7 @@ parser.add_argument('--short_len_factor_min', type=float, default=0.35, help='mi
 parser.add_argument('--comp_sub_pair_hyper_mix', type=float, default=0.5, help='blend ratio for pairwise vs hypergraph comp/sub embeddings')
 parser.add_argument('--interest_k', type=int, default=3, help='number of interest capsules for multi-interest routing')
 parser.add_argument('--interest_routing', type=int, default=3, help='dynamic routing iterations for interest capsules')
-parser.add_argument('--interest_fuse_weight', type=float, default=0.35, help='residual weight for interest capsule fusion')
+parser.add_argument('--interest_fuse_weight', type=float, default=0.35, help='residual weight for interest capsule fusion (0-1)')
 parser.add_argument('--interest_fuse_bias', type=float, default=1.0, help='bias initialization for interest capsule fusion gate')
 parser.add_argument('--comp_max_gap', type=int, default=3, help='max sequence distance for complementary relation mining')
 parser.add_argument('--comp_sub_topk', type=int, default=8, help='top-k related items in each comp/sub hyperedge')
