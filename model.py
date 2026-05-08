@@ -104,7 +104,7 @@ class InterestCapsuleLayer(Module):
         self.emb_size = emb_size
         self.num_interests = num_interests
         self.routing_iters = routing_iters
-        # keep projection bias-free so routing logits stay centered during initialization
+        # keep projection bias-free so routing logits stay centered for symmetric initialization
         self.interest_projection = nn.Linear(self.emb_size, self.num_interests * self.emb_size, bias=False)
         self.eps = EPSILON  # capsule routing stability epsilon
 
@@ -388,7 +388,7 @@ class MDHG(Module):
         view_inputs = torch.stack([s1, s2, s3], dim=1)
         interests = self.interest_capsule(view_inputs)
         # dot-product similarity between each interest capsule and the session representation
-        # keep raw dot-product magnitude; softmax normalization happens on relevance scores
+        # keep raw dot-product magnitude; softmax handles normalization while preserving scale cues
         capsule_relevance_scores = torch.sum(interests * sf.unsqueeze(1), dim=-1)
         capsule_attention_weights = torch.softmax(capsule_relevance_scores, dim=1)
         interest_fused = torch.sum(capsule_attention_weights.unsqueeze(-1) * interests, dim=1)

@@ -457,6 +457,7 @@ def data_item_hypergraph_comp_sub(
             continue
         uniq = list(dict.fromkeys(seq))
         # downweight long sessions so large baskets do not dominate relation mining
+        # sqrt scaling keeps short sessions influential without overly amplifying them
         session_scale = 1.0 / np.sqrt(len(uniq))
         for item_id in uniq:
             item_sess_freq[item_id] += 1.0
@@ -573,6 +574,7 @@ def data_item_hypergraph_comp_sub(
                     comp_adj[src] = dict()
                 comp_adj[src][dst] = comp_adj[src].get(dst, 0.0) + comp_co_weight * norm
 
+    # ensure non-zero frequencies for stability in downstream normalization
     item_sess_freq_clipped = np.maximum(item_sess_freq, 1.0)
     comp_adj = _score_relation_graph(
         comp_adj, item_sess_freq_clipped, min_support=min_support, min_norm_weight=min_norm_weight,
