@@ -456,6 +456,7 @@ def data_item_hypergraph_comp_sub(
         if len(seq) <= 1:
             continue
         uniq = list(dict.fromkeys(seq))
+        # downweight long sessions so large baskets do not dominate relation mining
         session_scale = 1.0 / np.log1p(len(uniq) + EPSILON)
         for item_id in seq:
             item_freq[item_id] += 1.0
@@ -574,13 +575,13 @@ def data_item_hypergraph_comp_sub(
                     comp_adj[src] = dict()
                 comp_adj[src][dst] = comp_adj[src].get(dst, 0.0) + comp_co_weight * norm
 
-    item_norm_freq = np.maximum(item_sess_freq, 1.0)
+    item_sess_freq_floored = np.maximum(item_sess_freq, 1.0)
     comp_adj = _score_relation_graph(
-        comp_adj, item_norm_freq, min_support=min_support, min_norm_weight=min_norm_weight,
+        comp_adj, item_sess_freq_floored, min_support=min_support, min_norm_weight=min_norm_weight,
         head_quantile=comp_head_quantile, head_scale=comp_head_scale, tail_scale=comp_tail_scale
     )
     sub_adj = _score_relation_graph(
-        sub_adj, item_norm_freq, min_support=min_support, min_norm_weight=min_norm_weight,
+        sub_adj, item_sess_freq_floored, min_support=min_support, min_norm_weight=min_norm_weight,
         head_quantile=sub_head_quantile, head_scale=sub_head_scale, tail_scale=sub_tail_scale
     )
 

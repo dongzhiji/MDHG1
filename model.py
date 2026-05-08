@@ -103,7 +103,7 @@ class InterestCapsuleLayer(Module):
         self.num_interests = num_interests
         self.routing_iters = routing_iters
         self.interest_projection = nn.Linear(self.emb_size, self.num_interests * self.emb_size, bias=False)
-        self.eps = 1e-8
+        self.eps = 1e-8  # capsule routing stability epsilon
 
     def squash(self, s):
         norm_sq = (s ** 2).sum(dim=-1, keepdim=True)
@@ -190,6 +190,10 @@ class MDHG(Module):
         self.attention = nn.Parameter(torch.Tensor(1, self.emb_size))
         self.attention_mat = nn.Parameter(torch.Tensor(self.emb_size, self.emb_size))
 
+        if interest_k <= 0:
+            raise ValueError(f"interest_k must be > 0, got {interest_k}")
+        if interest_routing <= 0:
+            raise ValueError(f"interest_routing must be > 0, got {interest_routing}")
         self.interest_k = interest_k
         self.interest_routing = interest_routing
         interest_fuse_weight = float(interest_fuse_weight)
@@ -386,6 +390,7 @@ class MDHG(Module):
         # concatenate sf and interest_fused so the gate sees both base and routed intent
         retain_gate = torch.sigmoid(self.interest_fuse_gate(torch.cat([sf, interest_fused], dim=1)))
         # retain_gate close to 1 keeps sf; (1 - retain_gate) controls routed interest injection
+        # interest_fuse_weight scales the dynamic gating strength for routed interests
         routing_contribution = self.interest_fuse_weight * (1.0 - retain_gate) * interest_fused
         return sf + routing_contribution
 
