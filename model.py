@@ -192,9 +192,10 @@ class MDHG(Module):
 
         self.interest_k = interest_k
         self.interest_routing = interest_routing
+        interest_fuse_weight = float(interest_fuse_weight)
         if not (0.0 <= interest_fuse_weight <= 1.0):
             raise ValueError("interest_fuse_weight must be in [0, 1].")
-        self.interest_fuse_weight = float(interest_fuse_weight)
+        self.interest_fuse_weight = interest_fuse_weight
         self.interest_fuse_bias = interest_fuse_bias
         self.interest_capsule = InterestCapsuleLayer(
             self.emb_size, num_interests=self.interest_k, routing_iters=self.interest_routing
@@ -368,7 +369,12 @@ class MDHG(Module):
         return mixed, score
 
     def fuse_interest_capsules(self, s1, s2, s3, sf):
-        """Fuse routed interest capsules (from s1/s2/s3) into the session representation."""
+        """Fuse routed interest capsules into the session representation.
+
+        Args:
+            s1, s2, s3: session view embeddings from the three item-graph channels.
+            sf: fused session representation before interest routing.
+        """
         view_inputs = torch.stack([s1, s2, s3], dim=1)
         interests = self.interest_capsule(view_inputs)
         # dot-product similarity between each interest capsule and the session representation
