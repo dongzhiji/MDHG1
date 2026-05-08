@@ -114,6 +114,7 @@ class InterestCapsuleLayer(Module):
         # inputs: [batch_size, num_inputs, emb_size]
         batch_size, num_inputs, _ = inputs.size()
         u_hat = self.interest_projection(inputs).view(batch_size, num_inputs, self.num_interests, self.emb_size)
+        # start routing logits at zero to let coefficients initialize uniformly
         routing_logits = torch.zeros(
             batch_size, num_inputs, self.num_interests, device=inputs.device, dtype=inputs.dtype
         )
@@ -191,7 +192,7 @@ class MDHG(Module):
 
         self.interest_k = interest_k
         self.interest_routing = interest_routing
-        self.interest_fuse_weight = interest_fuse_weight
+        self.interest_fuse_weight = max(0.0, min(1.0, float(interest_fuse_weight)))
         self.interest_fuse_bias = interest_fuse_bias
         self.interest_capsule = InterestCapsuleLayer(
             self.emb_size, num_interests=self.interest_k, routing_iters=self.interest_routing
@@ -364,14 +365,14 @@ class MDHG(Module):
         return mixed, score
 
     def fuse_interest_capsules(self, s1, s2, s3, sf):
+        """Fuse routed interest capsules (from s1/s2/s3) into the session representation."""
         view_inputs = torch.stack([s1, s2, s3], dim=1)
         interests = self.interest_capsule(view_inputs)
         capsule_relevance_scores = torch.sum(interests * sf.unsqueeze(1), dim=-1)
         capsule_attention_weights = torch.softmax(capsule_relevance_scores, dim=1)
         interest_fused = torch.sum(capsule_attention_weights.unsqueeze(-1) * interests, dim=1)
         gate = torch.sigmoid(self.interest_fuse_gate(torch.cat([sf, interest_fused], dim=1)))
-        residual_weight = sf.new_tensor(self.interest_fuse_weight).clamp_(min=0.0, max=1.0)
-        return sf + residual_weight * (1.0 - gate) * interest_fused
+        return sf + self.interest_fuse_weight * (1.0 - gate) * interest_fused
 
     def fuse_session_views(self, s1, s2, s3, gate):
         gate = gate / (gate.sum(dim=1, keepdim=True) + 1e-8)
