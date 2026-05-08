@@ -134,7 +134,7 @@ class MDHG(Module):
                  K1, K2, K3, dropout, alpha, emb_size=100, batch_size=100,
                  intent_align_weight=0.03, short_intent_min=0.10, short_intent_max=0.45,
                  short_len_factor_min=0.35, comp_sub_pair_hyper_mix=0.5, comp_sub_decouple_weight=0.02,
-                 interest_k=3, interest_routing=3):
+                 interest_k=3, interest_routing=3, interest_fuse_weight=0.35, interest_fuse_bias=1.0):
         super(MDHG, self).__init__()
         self.emb_size = emb_size
         self.batch_size = batch_size
@@ -191,6 +191,8 @@ class MDHG(Module):
 
         self.interest_k = interest_k
         self.interest_routing = interest_routing
+        self.interest_fuse_weight = interest_fuse_weight
+        self.interest_fuse_bias = interest_fuse_bias
         self.interest_capsule = InterestCapsuleLayer(
             self.emb_size, num_interests=self.interest_k, routing_iters=self.interest_routing
         )
@@ -266,6 +268,8 @@ class MDHG(Module):
             self.event_scale.weight.data[1] = torch.tensor([0.5], device=d)
             self.event_scale.weight.data[2] = torch.tensor([1.2], device=d)
             self.event_scale.weight.data[3] = torch.tensor([2.0], device=d)
+            if self.interest_fuse_gate.bias is not None:
+                self.interest_fuse_gate.bias.data.fill_(self.interest_fuse_bias)
     def trans_adj(self, adjacency):
         values = adjacency.data
         indices = np.vstack((adjacency.row, adjacency.col))
@@ -366,7 +370,8 @@ class MDHG(Module):
         capsule_attention_weights = torch.softmax(capsule_relevance_scores, dim=1)
         interest_fused = torch.sum(capsule_attention_weights.unsqueeze(-1) * interests, dim=1)
         gate = torch.sigmoid(self.interest_fuse_gate(torch.cat([sf, interest_fused], dim=1)))
-        return gate * sf + (1.0 - gate) * interest_fused
+        residual_weight = sf.new_tensor(self.interest_fuse_weight).clamp_(min=0.0, max=1.0)
+        return sf + residual_weight * (1.0 - gate) * interest_fused
 
     def fuse_session_views(self, s1, s2, s3, gate):
         gate = gate / (gate.sum(dim=1, keepdim=True) + 1e-8)
