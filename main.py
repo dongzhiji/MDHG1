@@ -74,6 +74,8 @@ opt = parser.parse_args()
 log_file = setup_logging()
 logging.info(f"日志文件: {log_file}")
 logging.info(f"运行参数: {opt}")
+if not (0.0 <= opt.interest_fuse_weight <= 1.0):
+    raise ValueError("interest_fuse_weight must be in [0, 1].")
 if opt.amp:
     logging.warning("参数 --amp 已废弃且会被忽略，当前固定不使用AMP。")
 

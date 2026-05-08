@@ -199,6 +199,7 @@ class MDHG(Module):
         self.interest_capsule = InterestCapsuleLayer(
             self.emb_size, num_interests=self.interest_k, routing_iters=self.interest_routing
         )
+        # gate consumes concatenated [sf, interest_fused]
         self.interest_fuse_gate = nn.Linear(self.emb_size * 2, 1)
 
         self.gate_mlp = nn.Sequential(
@@ -257,6 +258,9 @@ class MDHG(Module):
         self.comp_sub_decouple_weight = comp_sub_decouple_weight
         self._position_weight_cache = dict()
         self.init_parameters()
+        with torch.no_grad():
+            if self.interest_fuse_gate.bias is not None:
+                self.interest_fuse_gate.bias.data.fill_(self.interest_fuse_bias)
 
     def init_parameters(self):
         stdv = 1.0 / math.sqrt(self.emb_size)
@@ -271,8 +275,6 @@ class MDHG(Module):
             self.event_scale.weight.data[1] = torch.tensor([0.5], device=d)
             self.event_scale.weight.data[2] = torch.tensor([1.2], device=d)
             self.event_scale.weight.data[3] = torch.tensor([2.0], device=d)
-            if self.interest_fuse_gate.bias is not None:
-                self.interest_fuse_gate.bias.data.fill_(self.interest_fuse_bias)
     def trans_adj(self, adjacency):
         values = adjacency.data
         indices = np.vstack((adjacency.row, adjacency.col))
