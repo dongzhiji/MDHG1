@@ -442,10 +442,11 @@ def data_item_hypergraph_comp_sub(
     co_buy_adj = dict()
     dist_weights = [1.0 / d for d in range(1, max_gap + 1)]
 
-    def context_pair_weight(count_a, count_b, item_a=None, item_b=None):
-        base = (count_a * count_b) / (count_a + count_b + EPSILON)
-        if item_a is None or item_b is None:
-            return base
+    def context_pair_weight(count_a, count_b):
+        return (count_a * count_b) / (count_a + count_b + EPSILON)
+
+    def context_pair_weight_normalized(count_a, count_b, item_a, item_b):
+        base = context_pair_weight(count_a, count_b)
         denom = np.sqrt(item_sess_freq[item_a] * item_sess_freq[item_b] + EPSILON)
         return base / denom
 
@@ -456,7 +457,7 @@ def data_item_hypergraph_comp_sub(
             continue
         uniq = list(dict.fromkeys(seq))
         # downweight long sessions so large baskets do not dominate relation mining
-        session_scale = 1.0 / np.log1p(len(uniq))
+        session_scale = 1.0 / np.sqrt(len(uniq))
         for item_id in uniq:
             item_sess_freq[item_id] += 1.0
         for i in range(len(uniq)):
@@ -533,7 +534,7 @@ def data_item_hypergraph_comp_sub(
             ia, ca = items[a]
             for b in range(a + 1, len(items)):
                 ib, cb = items[b]
-                w = context_pair_weight(ca, cb, ia, ib)
+                w = context_pair_weight_normalized(ca, cb, ia, ib)
                 p_ab = co_buy_penalty(ia, ib)
                 p_ba = co_buy_penalty(ib, ia)
                 add_sub_pair(ia, ib, w * p_ab)
@@ -550,7 +551,7 @@ def data_item_hypergraph_comp_sub(
             ia, ca = items[a]
             for b in range(a + 1, len(items)):
                 ib, cb = items[b]
-                w = context_pair_weight(ca, cb, ia, ib)
+                w = context_pair_weight_normalized(ca, cb, ia, ib)
                 p_ab = co_buy_penalty(ia, ib)
                 p_ba = co_buy_penalty(ib, ia)
                 add_sub_pair(ia, ib, w * p_ab)
@@ -572,13 +573,13 @@ def data_item_hypergraph_comp_sub(
                     comp_adj[src] = dict()
                 comp_adj[src][dst] = comp_adj[src].get(dst, 0.0) + comp_co_weight * norm
 
-    item_sess_freq_min_one = np.maximum(item_sess_freq, 1.0)
+    item_sess_freq_clipped = np.maximum(item_sess_freq, 1.0)
     comp_adj = _score_relation_graph(
-        comp_adj, item_sess_freq_min_one, min_support=min_support, min_norm_weight=min_norm_weight,
+        comp_adj, item_sess_freq_clipped, min_support=min_support, min_norm_weight=min_norm_weight,
         head_quantile=comp_head_quantile, head_scale=comp_head_scale, tail_scale=comp_tail_scale
     )
     sub_adj = _score_relation_graph(
-        sub_adj, item_sess_freq_min_one, min_support=min_support, min_norm_weight=min_norm_weight,
+        sub_adj, item_sess_freq_clipped, min_support=min_support, min_norm_weight=min_norm_weight,
         head_quantile=sub_head_quantile, head_scale=sub_head_scale, tail_scale=sub_tail_scale
     )
 

@@ -104,7 +104,7 @@ class InterestCapsuleLayer(Module):
         self.emb_size = emb_size
         self.num_interests = num_interests
         self.routing_iters = routing_iters
-        # keep projection bias-free to stabilize routing logits around zero
+        # keep projection bias-free so routing logits stay centered during initialization
         self.interest_projection = nn.Linear(self.emb_size, self.num_interests * self.emb_size, bias=False)
         self.eps = EPSILON  # capsule routing stability epsilon
 
@@ -211,6 +211,9 @@ class MDHG(Module):
         )
         # gate consumes concatenated [sf, interest_fused]
         self.interest_fuse_gate = nn.Linear(self.emb_size * 2, 1)
+        with torch.no_grad():
+            if self.interest_fuse_gate.bias is not None:
+                self.interest_fuse_gate.bias.data.fill_(self.interest_fuse_bias)
 
         self.gate_mlp = nn.Sequential(
             nn.Linear(self.emb_size, self.emb_size),
@@ -282,9 +285,6 @@ class MDHG(Module):
             self.event_scale.weight.data[1] = torch.tensor([0.5], device=d)
             self.event_scale.weight.data[2] = torch.tensor([1.2], device=d)
             self.event_scale.weight.data[3] = torch.tensor([2.0], device=d)
-        with torch.no_grad():
-            if self.interest_fuse_gate.bias is not None:
-                self.interest_fuse_gate.bias.data.fill_(self.interest_fuse_bias)
     def trans_adj(self, adjacency):
         values = adjacency.data
         indices = np.vstack((adjacency.row, adjacency.col))
@@ -388,6 +388,7 @@ class MDHG(Module):
         view_inputs = torch.stack([s1, s2, s3], dim=1)
         interests = self.interest_capsule(view_inputs)
         # dot-product similarity between each interest capsule and the session representation
+        # keep raw dot-product magnitude; softmax normalization happens on relevance scores
         capsule_relevance_scores = torch.sum(interests * sf.unsqueeze(1), dim=-1)
         capsule_attention_weights = torch.softmax(capsule_relevance_scores, dim=1)
         interest_fused = torch.sum(capsule_attention_weights.unsqueeze(-1) * interests, dim=1)
