@@ -104,6 +104,7 @@ class InterestCapsuleLayer(Module):
         self.emb_size = emb_size
         self.num_interests = num_interests
         self.routing_iters = routing_iters
+        # keep projection bias-free to stabilize routing logits around zero
         self.interest_projection = nn.Linear(self.emb_size, self.num_interests * self.emb_size, bias=False)
         self.eps = EPSILON  # capsule routing stability epsilon
 
@@ -281,6 +282,7 @@ class MDHG(Module):
             self.event_scale.weight.data[1] = torch.tensor([0.5], device=d)
             self.event_scale.weight.data[2] = torch.tensor([1.2], device=d)
             self.event_scale.weight.data[3] = torch.tensor([2.0], device=d)
+        with torch.no_grad():
             if self.interest_fuse_gate.bias is not None:
                 self.interest_fuse_gate.bias.data.fill_(self.interest_fuse_bias)
     def trans_adj(self, adjacency):
@@ -390,7 +392,8 @@ class MDHG(Module):
         capsule_attention_weights = torch.softmax(capsule_relevance_scores, dim=1)
         interest_fused = torch.sum(capsule_attention_weights.unsqueeze(-1) * interests, dim=1)
         # concatenate sf and interest_fused so the gate sees both base and routed intent
-        retain_gate = torch.sigmoid(self.interest_fuse_gate(torch.cat([sf, interest_fused], dim=1)))
+        gate_inputs = torch.cat([sf, interest_fused], dim=1)  # [B, 2D]
+        retain_gate = torch.sigmoid(self.interest_fuse_gate(gate_inputs))
         # retain_gate close to 1 keeps sf; (1 - retain_gate) controls routed interest injection
         # interest_fuse_weight scales the dynamic gating strength for routed interests
         routing_contribution = self.interest_fuse_weight * (1.0 - retain_gate) * interest_fused

@@ -436,7 +436,6 @@ def data_item_hypergraph_comp_sub(
     """
     comp_adj = dict()
     sub_adj = dict()
-    item_freq = np.zeros(n_node, dtype=np.float32)
     item_sess_freq = np.zeros(n_node, dtype=np.float32)
     prev_to_next = dict()
     next_to_prev = dict()
@@ -458,8 +457,6 @@ def data_item_hypergraph_comp_sub(
         uniq = list(dict.fromkeys(seq))
         # downweight long sessions so large baskets do not dominate relation mining
         session_scale = 1.0 / np.log1p(len(uniq))
-        for item_id in seq:
-            item_freq[item_id] += 1.0
         for item_id in uniq:
             item_sess_freq[item_id] += 1.0
         for i in range(len(uniq)):
