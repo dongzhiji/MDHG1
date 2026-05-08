@@ -114,7 +114,7 @@ class InterestCapsuleLayer(Module):
         # inputs: [batch_size, num_inputs, emb_size]
         batch_size, num_inputs, _ = inputs.size()
         u_hat = self.interest_projection(inputs).view(batch_size, num_inputs, self.num_interests, self.emb_size)
-        # start routing logits at zero to let coefficients initialize uniformly
+        # start routing logits at zero so the first routing softmax is uniform
         routing_logits = torch.zeros(
             batch_size, num_inputs, self.num_interests, device=inputs.device, dtype=inputs.dtype
         )
@@ -194,7 +194,9 @@ class MDHG(Module):
         self.interest_routing = interest_routing
         interest_fuse_weight = float(interest_fuse_weight)
         if not (0.0 <= interest_fuse_weight <= 1.0):
-            raise ValueError("interest_fuse_weight must be in range [0.0, 1.0].")
+            raise ValueError(
+                f"interest_fuse_weight must be in range [0.0, 1.0], got {interest_fuse_weight}"
+            )
         self.interest_fuse_weight = interest_fuse_weight
         self.interest_fuse_bias = interest_fuse_bias
         self.interest_capsule = InterestCapsuleLayer(

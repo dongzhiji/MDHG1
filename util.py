@@ -455,12 +455,12 @@ def data_item_hypergraph_comp_sub(
         seq = [x - 1 for x in sess if x != 0 and 1 <= x <= n_node]
         if len(seq) <= 1:
             continue
+        uniq = list(dict.fromkeys(seq))
         session_scale = 1.0 / np.log1p(len(uniq) + EPSILON)
         for item_id in seq:
             item_freq[item_id] += 1.0
         for item_id in uniq:
             item_sess_freq[item_id] += 1.0
-        uniq = list(dict.fromkeys(seq))
         for i in range(len(uniq)):
             a = uniq[i]
             if a not in co_buy_adj:
@@ -553,6 +553,10 @@ def data_item_hypergraph_comp_sub(
             for b in range(a + 1, len(items)):
                 ib, cb = items[b]
                 w = context_pair_weight(ca, cb, ia, ib)
+                p_ab = co_buy_penalty(ia, ib)
+                p_ba = co_buy_penalty(ib, ia)
+                add_sub_pair(ia, ib, w * p_ab)
+                add_sub_pair(ib, ia, w * p_ba)
 
     if comp_co_weight > 0.0:
         for src, dst_dict in co_buy_adj.items():
@@ -569,10 +573,6 @@ def data_item_hypergraph_comp_sub(
                 if src not in comp_adj:
                     comp_adj[src] = dict()
                 comp_adj[src][dst] = comp_adj[src].get(dst, 0.0) + comp_co_weight * norm
-                p_ab = co_buy_penalty(ia, ib)
-                p_ba = co_buy_penalty(ib, ia)
-                add_sub_pair(ia, ib, w * p_ab)
-                add_sub_pair(ib, ia, w * p_ba)
 
     item_norm_freq = np.maximum(item_sess_freq, 1.0)
     comp_adj = _score_relation_graph(
