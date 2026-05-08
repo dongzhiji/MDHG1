@@ -192,8 +192,9 @@ class MDHG(Module):
 
         self.interest_k = interest_k
         self.interest_routing = interest_routing
-        # clamp to [0,1] to keep residual blending stable
-        self.interest_fuse_weight = max(0.0, min(1.0, float(interest_fuse_weight)))
+        if not (0.0 <= interest_fuse_weight <= 1.0):
+            raise ValueError("interest_fuse_weight must be in [0, 1].")
+        self.interest_fuse_weight = float(interest_fuse_weight)
         self.interest_fuse_bias = interest_fuse_bias
         self.interest_capsule = InterestCapsuleLayer(
             self.emb_size, num_interests=self.interest_k, routing_iters=self.interest_routing
@@ -374,6 +375,7 @@ class MDHG(Module):
         interest_fused = torch.sum(capsule_attention_weights.unsqueeze(-1) * interests, dim=1)
         # concatenate sf and interest_fused so the gate sees both base and routed intent
         retain_gate = torch.sigmoid(self.interest_fuse_gate(torch.cat([sf, interest_fused], dim=1)))
+        # retain_gate close to 1 keeps sf; (1 - retain_gate) controls routed interest injection
         return sf + self.interest_fuse_weight * (1.0 - retain_gate) * interest_fused
 
     def fuse_session_views(self, s1, s2, s3, gate):
