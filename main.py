@@ -54,6 +54,8 @@ parser.add_argument('--comp_sub_topk', type=int, default=8, help='top-k related 
 parser.add_argument('--comp_sub_min_neighbors', type=int, default=1, help='minimum neighbors required to form a comp/sub hyperedge')
 parser.add_argument('--comp_sub_min_support', type=float, default=1.0, help='minimum raw relation support before normalization')
 parser.add_argument('--comp_sub_min_norm_weight', type=float, default=0.02, help='minimum normalized relation weight kept in comp/sub graph')
+parser.add_argument('--comp_seq_weight', type=float, default=1.0, help='sequential weight for complementary relations')
+parser.add_argument('--comp_co_weight', type=float, default=0.6, help='session co-occurrence weight for complementary relations')
 parser.add_argument('--sub_context_topk', type=int, default=20, help='max candidates per substitute context (prev/next)')
 parser.add_argument('--sub_context_min', type=int, default=2, help='minimum candidates per substitute context')
 parser.add_argument('--comp_symmetric', type=int, default=1, help='whether complementary relation graph is symmetric (1) or directed (0)')
@@ -135,6 +137,7 @@ def main():
         train_data, all_train, shuffle=False, n_node=n_node, comp_max_gap=opt.comp_max_gap,
         comp_sub_topk=opt.comp_sub_topk, comp_sub_min_neighbors=opt.comp_sub_min_neighbors,
         comp_sub_min_support=opt.comp_sub_min_support, comp_sub_min_norm_weight=opt.comp_sub_min_norm_weight,
+        comp_seq_weight=opt.comp_seq_weight, comp_co_weight=opt.comp_co_weight,
         sub_context_topk=opt.sub_context_topk, sub_context_min=opt.sub_context_min,
         comp_symmetric=bool(opt.comp_symmetric),
         sub_co_buy_suppress=opt.sub_co_buy_suppress,
@@ -148,6 +151,7 @@ def main():
         test_data, all_train, shuffle=False, n_node=n_node, comp_max_gap=opt.comp_max_gap,
         comp_sub_topk=opt.comp_sub_topk, comp_sub_min_neighbors=opt.comp_sub_min_neighbors,
         comp_sub_min_support=opt.comp_sub_min_support, comp_sub_min_norm_weight=opt.comp_sub_min_norm_weight,
+        comp_seq_weight=opt.comp_seq_weight, comp_co_weight=opt.comp_co_weight,
         sub_context_topk=opt.sub_context_topk, sub_context_min=opt.sub_context_min,
         comp_symmetric=bool(opt.comp_symmetric),
         sub_co_buy_suppress=opt.sub_co_buy_suppress,

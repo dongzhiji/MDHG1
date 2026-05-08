@@ -418,6 +418,7 @@ def data_item_hypergraph_comp_sub(
         all_sessions, n_node, max_gap=3, topk=8, min_neighbors=1,
         min_support=1.0, min_norm_weight=0.02, sub_context_topk=20, sub_context_min=2,
         comp_symmetric=True, sub_co_buy_suppress=0.6,
+        comp_seq_weight=1.0, comp_co_weight=0.6,
         comp_head_quantile=0.8, comp_head_scale=1.15, comp_tail_scale=0.85,
         sub_head_quantile=0.8, sub_head_scale=1.15, sub_tail_scale=0.85):
     """
@@ -436,21 +437,29 @@ def data_item_hypergraph_comp_sub(
     comp_adj = dict()
     sub_adj = dict()
     item_freq = np.zeros(n_node, dtype=np.float32)
+    item_sess_freq = np.zeros(n_node, dtype=np.float32)
     prev_to_next = dict()
     next_to_prev = dict()
     co_buy_adj = dict()
     dist_weights = [1.0 / d for d in range(1, max_gap + 1)]
 
-    def context_pair_weight(count_a, count_b):
-        return (count_a * count_b) / (count_a + count_b + EPSILON)
+    def context_pair_weight(count_a, count_b, item_a=None, item_b=None):
+        base = (count_a * count_b) / (count_a + count_b + EPSILON)
+        if item_a is None or item_b is None:
+            return base
+        denom = np.sqrt(item_sess_freq[item_a] * item_sess_freq[item_b] + EPSILON)
+        return base / denom
 
     for sess in all_sessions:
         # convert 1-indexed item ids to 0-indexed graph ids; skip padding/out-of-range ids
         seq = [x - 1 for x in sess if x != 0 and 1 <= x <= n_node]
         if len(seq) <= 1:
             continue
+        session_scale = 1.0 / np.log1p(len(uniq) + EPSILON)
         for item_id in seq:
             item_freq[item_id] += 1.0
+        for item_id in uniq:
+            item_sess_freq[item_id] += 1.0
         uniq = list(dict.fromkeys(seq))
         for i in range(len(uniq)):
             a = uniq[i]
@@ -460,8 +469,8 @@ def data_item_hypergraph_comp_sub(
                 b = uniq[j]
                 if b not in co_buy_adj:
                     co_buy_adj[b] = dict()
-                co_buy_adj[a][b] = co_buy_adj[a].get(b, 0.0) + 1.0
-                co_buy_adj[b][a] = co_buy_adj[b].get(a, 0.0) + 1.0
+                co_buy_adj[a][b] = co_buy_adj[a].get(b, 0.0) + session_scale
+                co_buy_adj[b][a] = co_buy_adj[b].get(a, 0.0) + session_scale
 
         # complementary: close-by ordered co-occurrence in the same session
         for i in range(len(seq)):
@@ -471,7 +480,7 @@ def data_item_hypergraph_comp_sub(
                 dst = seq[j]
                 if src == dst:
                     continue
-                w = dist_weights[j - i - 1]
+                w = comp_seq_weight * dist_weights[j - i - 1] * session_scale
                 if src not in comp_adj:
                     comp_adj[src] = dict()
                 comp_adj[src][dst] = comp_adj[src].get(dst, 0.0) + w
@@ -492,8 +501,8 @@ def data_item_hypergraph_comp_sub(
                 prev_to_next[p][n] = 0.0
             if p not in next_to_prev[n]:
                 next_to_prev[n][p] = 0.0
-            prev_to_next[p][n] += 1.0
-            next_to_prev[n][p] += 1.0
+            prev_to_next[p][n] += session_scale
+            next_to_prev[n][p] += session_scale
 
     def add_sub_pair(i, j, w):
         if i == j:
@@ -508,8 +517,8 @@ def data_item_hypergraph_comp_sub(
         co = co_buy_adj.get(i, {}).get(j, 0.0)
         if co <= 0:
             return 1.0
-        fi = float(item_freq[i]) if 0 <= i < len(item_freq) else 0.0
-        fj = float(item_freq[j]) if 0 <= j < len(item_freq) else 0.0
+        fi = float(item_sess_freq[i]) if 0 <= i < len(item_sess_freq) else 0.0
+        fj = float(item_sess_freq[j]) if 0 <= j < len(item_sess_freq) else 0.0
         if fi <= 0.0 or fj <= 0.0:
             return 1.0
         norm_co = _pair_norm_strength(co, fi, fj)
@@ -526,7 +535,7 @@ def data_item_hypergraph_comp_sub(
             ia, ca = items[a]
             for b in range(a + 1, len(items)):
                 ib, cb = items[b]
-                w = context_pair_weight(ca, cb)
+                w = context_pair_weight(ca, cb, ia, ib)
                 p_ab = co_buy_penalty(ia, ib)
                 p_ba = co_buy_penalty(ib, ia)
                 add_sub_pair(ia, ib, w * p_ab)
@@ -543,26 +552,43 @@ def data_item_hypergraph_comp_sub(
             ia, ca = items[a]
             for b in range(a + 1, len(items)):
                 ib, cb = items[b]
-                w = context_pair_weight(ca, cb)
+                w = context_pair_weight(ca, cb, ia, ib)
+
+    if comp_co_weight > 0.0:
+        for src, dst_dict in co_buy_adj.items():
+            src_freq = float(item_sess_freq[src])
+            if src_freq <= 0.0:
+                continue
+            for dst, weight in dst_dict.items():
+                if src == dst:
+                    continue
+                dst_freq = float(item_sess_freq[dst])
+                if dst_freq <= 0.0:
+                    continue
+                norm = weight / np.sqrt(src_freq * dst_freq + EPSILON)
+                if src not in comp_adj:
+                    comp_adj[src] = dict()
+                comp_adj[src][dst] = comp_adj[src].get(dst, 0.0) + comp_co_weight * norm
                 p_ab = co_buy_penalty(ia, ib)
                 p_ba = co_buy_penalty(ib, ia)
                 add_sub_pair(ia, ib, w * p_ab)
                 add_sub_pair(ib, ia, w * p_ba)
 
+    item_norm_freq = np.maximum(item_sess_freq, 1.0)
     comp_adj = _score_relation_graph(
-        comp_adj, item_freq, min_support=min_support, min_norm_weight=min_norm_weight,
+        comp_adj, item_norm_freq, min_support=min_support, min_norm_weight=min_norm_weight,
         head_quantile=comp_head_quantile, head_scale=comp_head_scale, tail_scale=comp_tail_scale
     )
     sub_adj = _score_relation_graph(
-        sub_adj, item_freq, min_support=min_support, min_norm_weight=min_norm_weight,
+        sub_adj, item_norm_freq, min_support=min_support, min_norm_weight=min_norm_weight,
         head_quantile=sub_head_quantile, head_scale=sub_head_scale, tail_scale=sub_tail_scale
     )
 
     comp_anchor_conf = {}
     sub_anchor_conf = {}
-    max_item_freq = float(np.max(item_freq)) if np.max(item_freq) > 0 else 1.0
+    max_item_freq = float(np.max(item_sess_freq)) if np.max(item_sess_freq) > 0 else 1.0
     for i in range(n_node):
-        freq_conf = float(np.log1p(item_freq[i]) / np.log1p(max_item_freq + EPSILON))
+        freq_conf = float(np.log1p(item_sess_freq[i]) / np.log1p(max_item_freq + EPSILON))
         comp_rel = float(np.log1p(sum(comp_adj.get(i, {}).values())))
         sub_rel = float(np.log1p(sum(sub_adj.get(i, {}).values())))
         comp_anchor_conf[i] = float(np.clip(ANCHOR_MIX_FREQ * freq_conf + ANCHOR_MIX_REL * np.tanh(comp_rel), ANCHOR_CONF_MIN, ANCHOR_CONF_MAX))
@@ -587,6 +613,7 @@ class Data():
             sub_context_topk=20, sub_context_min=2, comp_symmetric=True,
             sub_co_buy_suppress=0.6, comp_head_quantile=0.8, comp_head_scale=1.15, comp_tail_scale=0.85,
             sub_head_quantile=0.8, sub_head_scale=1.15, sub_tail_scale=0.85,
+            comp_seq_weight=1.0, comp_co_weight=0.6,
             comp_sub_cache=True, comp_sub_cache_dir='', cache_prefix=''):
         if isinstance(data, tuple):
             data = list(data)
@@ -623,6 +650,8 @@ class Data():
                 'sub_context_min': sub_context_min,
                 'comp_symmetric': bool(comp_symmetric),
                 'sub_co_buy_suppress': sub_co_buy_suppress,
+                'comp_seq_weight': comp_seq_weight,
+                'comp_co_weight': comp_co_weight,
                 'comp_head_quantile': comp_head_quantile,
                 'comp_head_scale': comp_head_scale,
                 'comp_tail_scale': comp_tail_scale,
