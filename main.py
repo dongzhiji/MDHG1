@@ -46,7 +46,7 @@ parser.add_argument('--short_intent_max', type=float, default=0.45, help='maximu
 parser.add_argument('--short_len_factor_min', type=float, default=0.35, help='minimum session-length factor in short-term intent fusion')
 parser.add_argument('--contrastive_item_weight', type=float, default=0.0, help='weight for item-level contrastive loss on i1')
 parser.add_argument('--contrastive_session_weight', type=float, default=0.0, help='weight for session-level contrastive loss')
-parser.add_argument('--contrastive_temperature', type=float, default=0.2, help='temperature for contrastive loss')
+parser.add_argument('--contrastive_temperature', type=float, default=0.2, help='temperature for contrastive loss (>0)')
 parser.add_argument('--contrastive_dropout', type=float, default=0.1, help='dropout rate for contrastive views')
 parser.add_argument('--contrastive_item_max', type=int, default=2048, help='max items per batch for item-level contrastive (0 to use all)')
 parser.add_argument('--contrastive_session_mode', default='none', help='session contrastive target: none/s1/sf')

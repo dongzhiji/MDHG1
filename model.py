@@ -210,7 +210,10 @@ class MDHG(Module):
         )
         valid_contrastive_modes = {'none', 's1', 'sf'}
         if self.contrastive_session_mode not in valid_contrastive_modes:
-            raise ValueError(f'contrastive_session_mode must be one of {sorted(valid_contrastive_modes)}')
+            valid_modes_text = ', '.join(sorted(valid_contrastive_modes))
+            raise ValueError(f'contrastive_session_mode must be one of {valid_modes_text}')
+        if self.contrastive_temperature <= 0:
+            raise ValueError('contrastive_temperature must be > 0')
         self.topk_hardneg = 100
         self.score_temperature = 0.85
 
@@ -387,7 +390,7 @@ class MDHG(Module):
         if self.contrastive_item_weight > 0:
             item_ids = session_item[session_item > 0]
             if item_ids.numel() > 0:
-                item_ids = item_ids - 1  # session items are 1-indexed with 0 padding
+                item_ids = item_ids - 1  # convert 1-indexed (0 padding) to 0-indexed for embeddings
                 item_ids = torch.unique(item_ids)
                 if self.contrastive_item_max > 0 and item_ids.numel() > self.contrastive_item_max:
                     perm = torch.randperm(item_ids.numel(), device=item_ids.device)[:self.contrastive_item_max]
