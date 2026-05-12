@@ -44,6 +44,12 @@ parser.add_argument('--intent_align_weight', type=float, default=0.03, help='wei
 parser.add_argument('--short_intent_min', type=float, default=0.10, help='minimum short-term intent fusion gate')
 parser.add_argument('--short_intent_max', type=float, default=0.45, help='maximum short-term intent fusion gate')
 parser.add_argument('--short_len_factor_min', type=float, default=0.35, help='minimum session-length factor in short-term intent fusion')
+parser.add_argument('--contrastive_item_weight', type=float, default=0.0, help='weight for item-level contrastive loss on i1')
+parser.add_argument('--contrastive_session_weight', type=float, default=0.0, help='weight for session-level contrastive loss')
+parser.add_argument('--contrastive_temperature', type=float, default=0.2, help='temperature for contrastive loss')
+parser.add_argument('--contrastive_dropout', type=float, default=0.1, help='dropout rate for contrastive views')
+parser.add_argument('--contrastive_item_max', type=int, default=2048, help='max items per batch for item-level contrastive')
+parser.add_argument('--contrastive_session_mode', default='none', help='session contrastive target: none/s1/sf')
 parser.add_argument('--comp_sub_pair_hyper_mix', type=float, default=0.5, help='blend ratio for pairwise vs hypergraph comp/sub embeddings')
 parser.add_argument('--comp_max_gap', type=int, default=3, help='max sequence distance for complementary relation mining')
 parser.add_argument('--comp_sub_topk', type=int, default=8, help='top-k related items in each comp/sub hyperedge')
@@ -195,6 +201,12 @@ def main():
         short_intent_min=opt.short_intent_min,
         short_intent_max=opt.short_intent_max,
         short_len_factor_min=opt.short_len_factor_min,
+        contrastive_item_weight=opt.contrastive_item_weight,
+        contrastive_session_weight=opt.contrastive_session_weight,
+        contrastive_temperature=opt.contrastive_temperature,
+        contrastive_dropout=opt.contrastive_dropout,
+        contrastive_item_max=opt.contrastive_item_max,
+        contrastive_session_mode=opt.contrastive_session_mode,
         comp_sub_pair_hyper_mix=opt.comp_sub_pair_hyper_mix,
         comp_sub_decouple_weight=opt.comp_sub_decouple_weight
     ))
