@@ -366,8 +366,10 @@ class MDHG(Module):
         return F.dropout(embeddings, p=self.contrastive_dropout, training=self.training)
 
     def info_nce_loss(self, view_a, view_b):
-        if view_a.numel() == 0 or view_b.numel() == 0 or view_a.size(0) != view_b.size(0):
+        if view_a.numel() == 0 or view_b.numel() == 0:
             return torch.tensor(0.0, device=view_a.device)
+        if view_a.size(0) != view_b.size(0):
+            raise ValueError('Contrastive views must have the same batch size.')
         view_a = F.normalize(view_a, dim=-1)
         view_b = F.normalize(view_b, dim=-1)
         temperature = max(self.contrastive_temperature, MIN_CONTRASTIVE_TEMPERATURE)
@@ -382,7 +384,7 @@ class MDHG(Module):
         if self.contrastive_item_weight > 0:
             item_ids = session_item[session_item > 0]
             if item_ids.numel() > 0:
-                item_ids = torch.clamp(item_ids - 1, min=0, max=self.n_node - 1)
+                item_ids = item_ids - 1
                 item_ids = torch.unique(item_ids)
                 if self.contrastive_item_max > 0 and item_ids.numel() > self.contrastive_item_max:
                     perm = torch.randperm(item_ids.numel(), device=item_ids.device)[:self.contrastive_item_max]
@@ -613,9 +615,9 @@ class MDHG(Module):
         loss_item = ce_loss + self.bpr_loss_weight * bpr_loss + self.intent_align_weight * intent_align_loss
         if train:
             loss_item = loss_item + self.comp_sub_decouple_weight * comp_sub_decouple_loss
-        con_loss = torch.tensor(0.0, device=scores_item.device)
+        contrastive_loss = torch.tensor(0.0, device=scores_item.device)
         if train:
-            con_loss = self.compute_contrastive_loss(i1, session_item, s1, sf_before_final_dropout)
+            contrastive_loss = self.compute_contrastive_loss(i1, session_item, s1, sf_before_final_dropout)
 
         if train:
             fuzzy_raw = self.compute_fuzzy_losses(scores_item, tar, s1, s2, s3, sf, gate)
@@ -623,7 +625,7 @@ class MDHG(Module):
         else:
             fuzzy_loss = torch.tensor(0.0, device=scores_item.device)
 
-        return con_loss, loss_item, scores_item, fuzzy_loss
+        return contrastive_loss, loss_item, scores_item, fuzzy_loss
 
 
 def forward(model, i, data, epoch, train):
@@ -642,10 +644,10 @@ def forward(model, i, data, epoch, train):
     reversed_sess_item = trans_to_cuda(torch.Tensor(reversed_sess_item).long())
     reversed_sess_event = trans_to_cuda(torch.Tensor(reversed_sess_event).long())
 
-    con_loss, loss_item, scores_item, fuzzy_loss = model(
+    contrastive_loss, loss_item, scores_item, fuzzy_loss = model(
         session_item, session_len, reversed_sess_item, reversed_sess_event, mask, epoch, tar, train
     )
-    return tar, scores_item, con_loss, loss_item, fuzzy_loss
+    return tar, scores_item, contrastive_loss, loss_item, fuzzy_loss
 
 
 def train_test(model, train_data, test_data, epoch):
@@ -659,8 +661,8 @@ def train_test(model, train_data, test_data, epoch):
     for i in tqdm(slices):
         model.zero_grad()
         with torch.cuda.amp.autocast(enabled=amp_enabled):
-            tar, scores_item, con_loss, loss_item, fuzzy_loss = forward(model, i, train_data, epoch, train=True)
-            loss = loss_item + con_loss + fuzzy_loss
+            tar, scores_item, contrastive_loss, loss_item, fuzzy_loss = forward(model, i, train_data, epoch, train=True)
+            loss = loss_item + contrastive_loss + fuzzy_loss
         scaler.scale(loss).backward()
         scaler.unscale_(model.optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
