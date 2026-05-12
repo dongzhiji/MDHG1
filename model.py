@@ -7,7 +7,7 @@ from torch.nn import Module
 import torch.nn.functional as F
 from tqdm import tqdm
 
-MIN_CONTRASTIVE_TEMPERATURE = 1e-6
+CONTRASTIVE_TEMPERATURE_FLOOR = 1e-6
 
 def trans_to_cuda(variable):
     return variable.cuda() if torch.cuda.is_available() else variable
@@ -210,10 +210,11 @@ class MDHG(Module):
         )
         valid_contrastive_modes = {'none', 's1', 'sf'}
         if self.contrastive_session_mode not in valid_contrastive_modes:
-            valid_modes_text = ', '.join(sorted(valid_contrastive_modes))
-            raise ValueError(f'contrastive_session_mode must be one of {valid_modes_text}')
+            raise ValueError('contrastive_session_mode must be one of: none, s1, sf')
         if self.contrastive_temperature <= 0:
             raise ValueError('contrastive_temperature must be > 0')
+        if self.contrastive_item_max < 0:
+            raise ValueError('contrastive_item_max must be >= 0')
         self.topk_hardneg = 100
         self.score_temperature = 0.85
 
@@ -378,7 +379,7 @@ class MDHG(Module):
             raise ValueError('Contrastive views must have the same batch size.')
         view_a = F.normalize(view_a, dim=-1)
         view_b = F.normalize(view_b, dim=-1)
-        temperature = max(self.contrastive_temperature, MIN_CONTRASTIVE_TEMPERATURE)
+        temperature = max(self.contrastive_temperature, CONTRASTIVE_TEMPERATURE_FLOOR)
         logits = torch.matmul(view_a, view_b.t()) / temperature
         labels = torch.arange(view_a.size(0), device=view_a.device)
         loss_ab = F.cross_entropy(logits, labels)
@@ -596,7 +597,7 @@ class MDHG(Module):
         short_gate = self.short_intent_min + (self.short_intent_max - self.short_intent_min) * short_gate * len_factor
         short_gate = short_gate * valid_last.float().unsqueeze(1)
         sf = (1.0 - short_gate) * sf + short_gate * last_item_emb
-        sf_before_final_dropout = sf
+        sf_contrastive_view = sf
 
         if train:
             sf = self.final_dropout(sf)
@@ -623,7 +624,7 @@ class MDHG(Module):
             loss_item = loss_item + self.comp_sub_decouple_weight * comp_sub_decouple_loss
         contrastive_loss = torch.tensor(0.0, device=scores_item.device)
         if train:
-            contrastive_loss = self.compute_contrastive_loss(i1, session_item, s1, sf_before_final_dropout)
+            contrastive_loss = self.compute_contrastive_loss(i1, session_item, s1, sf_contrastive_view)
 
         if train:
             fuzzy_raw = self.compute_fuzzy_losses(scores_item, tar, s1, s2, s3, sf, gate)
