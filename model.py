@@ -363,7 +363,7 @@ class MDHG(Module):
         return F.dropout(embeddings, p=self.contrastive_dropout, training=self.training)
 
     def info_nce_loss(self, view_a, view_b):
-        if view_a.numel() == 0 or view_a.size(0) != view_b.size(0):
+        if view_a.numel() == 0 or view_b.numel() == 0 or view_a.size(0) != view_b.size(0):
             return torch.tensor(0.0, device=view_a.device)
         view_a = F.normalize(view_a, dim=-1)
         view_b = F.normalize(view_b, dim=-1)
