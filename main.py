@@ -48,7 +48,7 @@ parser.add_argument('--contrastive_item_weight', type=float, default=0.0, help='
 parser.add_argument('--contrastive_session_weight', type=float, default=0.0, help='weight for session-level contrastive loss')
 parser.add_argument('--contrastive_temperature', type=float, default=0.2, help='temperature for contrastive loss')
 parser.add_argument('--contrastive_dropout', type=float, default=0.1, help='dropout rate for contrastive views')
-parser.add_argument('--contrastive_item_max', type=int, default=2048, help='max items per batch for item-level contrastive')
+parser.add_argument('--contrastive_item_max', type=int, default=2048, help='max items per batch for item-level contrastive (0 to use all)')
 parser.add_argument('--contrastive_session_mode', default='none', help='session contrastive target: none/s1/sf')
 parser.add_argument('--comp_sub_pair_hyper_mix', type=float, default=0.5, help='blend ratio for pairwise vs hypergraph comp/sub embeddings')
 parser.add_argument('--comp_max_gap', type=int, default=3, help='max sequence distance for complementary relation mining')
