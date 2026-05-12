@@ -7,6 +7,8 @@ from torch.nn import Module
 import torch.nn.functional as F
 from tqdm import tqdm
 
+MIN_CONTRASTIVE_TEMPERATURE = 1e-6
+
 def trans_to_cuda(variable):
     return variable.cuda() if torch.cuda.is_available() else variable
 
@@ -203,8 +205,9 @@ class MDHG(Module):
         self.contrastive_temperature = contrastive_temperature
         self.contrastive_dropout = contrastive_dropout
         self.contrastive_item_max = contrastive_item_max
-        self.contrastive_session_mode = (contrastive_session_mode or 'none').lower()
-        self.contrastive_temp_min = 1e-6
+        self.contrastive_session_mode = (
+            contrastive_session_mode.lower() if contrastive_session_mode is not None else 'none'
+        )
         self.topk_hardneg = 100
         self.score_temperature = 0.85
 
@@ -367,7 +370,7 @@ class MDHG(Module):
             return torch.tensor(0.0, device=view_a.device)
         view_a = F.normalize(view_a, dim=-1)
         view_b = F.normalize(view_b, dim=-1)
-        temperature = max(self.contrastive_temperature, self.contrastive_temp_min)
+        temperature = max(self.contrastive_temperature, MIN_CONTRASTIVE_TEMPERATURE)
         logits = torch.matmul(view_a, view_b.t()) / temperature
         labels = torch.arange(view_a.size(0), device=view_a.device)
         loss_ab = F.cross_entropy(logits, labels)
@@ -377,8 +380,9 @@ class MDHG(Module):
     def compute_contrastive_loss(self, i1, session_item, s1, sf):
         total_loss = torch.tensor(0.0, device=i1.device)
         if self.contrastive_item_weight > 0:
-            item_ids = session_item[session_item > 0] - 1
+            item_ids = session_item[session_item > 0]
             if item_ids.numel() > 0:
+                item_ids = torch.clamp(item_ids - 1, min=0, max=self.n_node - 1)
                 item_ids = torch.unique(item_ids)
                 if self.contrastive_item_max > 0 and item_ids.numel() > self.contrastive_item_max:
                     perm = torch.randperm(item_ids.numel(), device=item_ids.device)[:self.contrastive_item_max]
@@ -584,7 +588,7 @@ class MDHG(Module):
         short_gate = self.short_intent_min + (self.short_intent_max - self.short_intent_min) * short_gate * len_factor
         short_gate = short_gate * valid_last.float().unsqueeze(1)
         sf = (1.0 - short_gate) * sf + short_gate * last_item_emb
-        sf_pre_dropout = sf
+        sf_before_final_dropout = sf
 
         if train:
             sf = self.final_dropout(sf)
@@ -611,7 +615,7 @@ class MDHG(Module):
             loss_item = loss_item + self.comp_sub_decouple_weight * comp_sub_decouple_loss
         con_loss = torch.tensor(0.0, device=scores_item.device)
         if train:
-            con_loss = self.compute_contrastive_loss(i1, session_item, s1, sf_pre_dropout)
+            con_loss = self.compute_contrastive_loss(i1, session_item, s1, sf_before_final_dropout)
 
         if train:
             fuzzy_raw = self.compute_fuzzy_losses(scores_item, tar, s1, s2, s3, sf, gate)
