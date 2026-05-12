@@ -204,6 +204,7 @@ class MDHG(Module):
         self.contrastive_dropout = contrastive_dropout
         self.contrastive_item_max = contrastive_item_max
         self.contrastive_session_mode = (contrastive_session_mode or 'none').lower()
+        self.contrastive_temp_min = 1e-6
         self.topk_hardneg = 100
         self.score_temperature = 0.85
 
@@ -359,14 +360,14 @@ class MDHG(Module):
     def apply_contrastive_dropout(self, embeddings):
         if self.contrastive_dropout <= 0:
             return embeddings
-        return F.dropout(embeddings, p=self.contrastive_dropout, training=True)
+        return F.dropout(embeddings, p=self.contrastive_dropout, training=self.training)
 
     def info_nce_loss(self, view_a, view_b):
         if view_a.numel() == 0 or view_a.size(0) != view_b.size(0):
             return torch.tensor(0.0, device=view_a.device)
         view_a = F.normalize(view_a, dim=-1)
         view_b = F.normalize(view_b, dim=-1)
-        temperature = max(self.contrastive_temperature, 1e-6)
+        temperature = max(self.contrastive_temperature, self.contrastive_temp_min)
         logits = torch.matmul(view_a, view_b.t()) / temperature
         labels = torch.arange(view_a.size(0), device=view_a.device)
         loss_ab = F.cross_entropy(logits, labels)
@@ -583,7 +584,7 @@ class MDHG(Module):
         short_gate = self.short_intent_min + (self.short_intent_max - self.short_intent_min) * short_gate * len_factor
         short_gate = short_gate * valid_last.float().unsqueeze(1)
         sf = (1.0 - short_gate) * sf + short_gate * last_item_emb
-        sf_for_contrastive = sf
+        sf_pre_dropout = sf
 
         if train:
             sf = self.final_dropout(sf)
@@ -610,7 +611,7 @@ class MDHG(Module):
             loss_item = loss_item + self.comp_sub_decouple_weight * comp_sub_decouple_loss
         con_loss = torch.tensor(0.0, device=scores_item.device)
         if train:
-            con_loss = self.compute_contrastive_loss(i1, session_item, s1, sf_for_contrastive)
+            con_loss = self.compute_contrastive_loss(i1, session_item, s1, sf_pre_dropout)
 
         if train:
             fuzzy_raw = self.compute_fuzzy_losses(scores_item, tar, s1, s2, s3, sf, gate)
