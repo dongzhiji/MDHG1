@@ -109,8 +109,12 @@ class CrossViewContrastiveLoss(Module):
         batch_size = view_a.size(0)
         identity = torch.arange(batch_size, device=view_a.device)
         shuffle_idx = torch.randperm(batch_size, device=view_a.device)
-        while torch.any(shuffle_idx == identity):
+        retries = 0
+        while torch.any(shuffle_idx == identity) and retries < 10:
             shuffle_idx = torch.randperm(batch_size, device=view_a.device)
+            retries += 1
+        if torch.any(shuffle_idx == identity):
+            shuffle_idx = torch.roll(identity, shifts=1)
         neg_view_b = view_b[shuffle_idx]
         pos_sim = torch.sum(view_a * view_b, dim=1, keepdim=True) / self.temperature
         neg_sim_full = torch.matmul(view_a, neg_view_b.t()) / self.temperature
@@ -132,7 +136,7 @@ class MDHG(Module):
                  K1, K2, K3, dropout, alpha, emb_size=100, batch_size=100,
                  intent_align_weight=0.03, short_intent_min=0.10, short_intent_max=0.45,
                  short_len_factor_min=0.35, comp_sub_pair_hyper_mix=0.5, comp_sub_decouple_weight=0.02,
-                 cl_weight=0.01):
+                 cl_weight=0.01, comp_sub_view_mix=0.5):
         super(MDHG, self).__init__()
         self.emb_size = emb_size
         self.batch_size = batch_size
@@ -241,7 +245,7 @@ class MDHG(Module):
         self.base_weight_max = 0.70
         self.comp_sub_pair_hyper_mix = comp_sub_pair_hyper_mix
         self.comp_sub_decouple_weight = comp_sub_decouple_weight
-        self.comp_sub_view_mix = 0.5
+        self.comp_sub_view_mix = comp_sub_view_mix
         self.cl_weight = cl_weight
         self.cross_view_contrastive = CrossViewContrastiveLoss()
         self._last_debug_epoch = -1
