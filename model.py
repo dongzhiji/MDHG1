@@ -107,17 +107,12 @@ class CrossViewContrastiveLoss(Module):
         view_a = F.normalize(view_a, p=2, dim=1)
         view_b = F.normalize(view_b, p=2, dim=1)
         batch_size = view_a.size(0)
-        shuffle_idx = torch.randperm(batch_size, device=view_a.device)
         identity = torch.arange(batch_size, device=view_a.device)
-        retries = 0
-        while torch.any(shuffle_idx == identity) and retries < 3:
-            shuffle_idx = torch.randperm(batch_size, device=view_a.device)
-            retries += 1
-        if torch.any(shuffle_idx == identity):
-            shuffle_idx = torch.roll(identity, shifts=1)
-        neg_view_a = view_a[shuffle_idx]
+        shift = torch.randint(1, batch_size, (1,), device=view_a.device).item()
+        shuffle_idx = torch.roll(identity, shifts=shift)
+        neg_view_b = view_b[shuffle_idx]
         pos_sim = torch.sum(view_a * view_b, dim=1, keepdim=True) / self.temperature
-        neg_sim = torch.matmul(view_b, neg_view_a.t()) / self.temperature
+        neg_sim = torch.matmul(view_a, neg_view_b.t()) / self.temperature
         logits = torch.cat([pos_sim, neg_sim], dim=1)
         labels = torch.zeros(batch_size, dtype=torch.long, device=view_a.device)
         return F.cross_entropy(logits, labels)
