@@ -96,6 +96,26 @@ class HyperGraphConv(Module):
         return torch.sum(torch.stack(outs), 0) / len(outs)
 
 
+class CrossViewContrastiveLoss(Module):
+    def __init__(self, temperature=0.2):
+        super(CrossViewContrastiveLoss, self).__init__()
+        self.temperature = temperature
+
+    def forward(self, view_a, view_b):
+        if view_a.size(0) < 2:
+            return view_a.new_tensor(0.0)
+        view_a = F.normalize(view_a, p=2, dim=1)
+        view_b = F.normalize(view_b, p=2, dim=1)
+        batch_size = view_a.size(0)
+        shuffle_idx = torch.randperm(batch_size, device=view_a.device)
+        neg_view_a = view_a[shuffle_idx]
+        pos_sim = torch.sum(view_a * view_b, dim=1) / self.temperature
+        neg_sim = torch.sum(neg_view_a * view_b, dim=1) / self.temperature
+        logits = torch.stack([pos_sim, neg_sim], dim=1)
+        labels = torch.zeros(batch_size, dtype=torch.long, device=view_a.device)
+        return F.cross_entropy(logits, labels)
+
+
 class MDHG(Module):
     def __init__(self, R, adj1, adj2, adjacency, adjacency_T, adjacency1, adjacency_comp, adjacency_sub, hyper_comp, hyper_sub, R1, comp_deg, sub_deg,
                  adjacency_fuzzy, adjacency_T_fuzzy, adjacency1_fuzzy,
@@ -103,7 +123,8 @@ class MDHG(Module):
                  n_node, lr, layers, l2, beta, lam, eps, dataset,
                  K1, K2, K3, dropout, alpha, emb_size=100, batch_size=100,
                  intent_align_weight=0.03, short_intent_min=0.10, short_intent_max=0.45,
-                 short_len_factor_min=0.35, comp_sub_pair_hyper_mix=0.5, comp_sub_decouple_weight=0.02):
+                 short_len_factor_min=0.35, comp_sub_pair_hyper_mix=0.5, comp_sub_decouple_weight=0.02,
+                 cl_weight=0.01):
         super(MDHG, self).__init__()
         self.emb_size = emb_size
         self.batch_size = batch_size
@@ -212,6 +233,9 @@ class MDHG(Module):
         self.base_weight_max = 0.70
         self.comp_sub_pair_hyper_mix = comp_sub_pair_hyper_mix
         self.comp_sub_decouple_weight = comp_sub_decouple_weight
+        self.cl_weight = cl_weight
+        self.cross_view_contrastive = CrossViewContrastiveLoss()
+        self._debug_cross_view_printed_epoch = -1
         self._position_weight_cache = dict()
         self.init_parameters()
 
@@ -454,6 +478,25 @@ class MDHG(Module):
         factor = min((epoch - self.warmup_epochs + 1) / span, 1.0)
         return self.max_fuzzy_factor * factor
 
+    def _debug_cross_view_features(self, line_view, hyper_view, epoch, train):
+        if not train or epoch == self._debug_cross_view_printed_epoch:
+            return
+        line_detach = line_view.detach()
+        hyper_detach = hyper_view.detach()
+        print(
+            '[CrossViewDebug] epoch={} line_view shape={} mean={:.6f} var={:.6f} | '
+            'hyper_view shape={} mean={:.6f} var={:.6f}'.format(
+                epoch,
+                tuple(line_detach.shape),
+                line_detach.mean().item(),
+                line_detach.var(unbiased=False).item(),
+                tuple(hyper_detach.shape),
+                hyper_detach.mean().item(),
+                hyper_detach.var(unbiased=False).item()
+            )
+        )
+        self._debug_cross_view_printed_epoch = epoch
+
     def forward(self, session_item, session_len, reversed_sess_item, reversed_sess_event, mask, epoch, tar, train):
         repeat_ratio = self.calc_repeat_ratio_batch(session_item)
         fuzzy_strength = (0.20 + 0.45 * torch.clamp(repeat_ratio / 0.3, max=1.0)).unsqueeze(1)
@@ -492,6 +535,10 @@ class MDHG(Module):
             s3_fuzzy = self.generate_sess_emb_npos(i3_fuzzy, event_weight, session_item, session_len,reversed_sess_item, reversed_sess_event, mask)
             s_comp = self.generate_sess_emb_npos(i_comp, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
             s_sub = self.generate_sess_emb_npos(i_sub, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
+            s_line_comp = self.generate_sess_emb_npos(i_comp_pair, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
+            s_line_sub = self.generate_sess_emb_npos(i_sub_pair, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
+            s_hyper_comp = self.generate_sess_emb_npos(i_comp_hyper, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
+            s_hyper_sub = self.generate_sess_emb_npos(i_sub_hyper, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
         else:
             s1 = self.generate_sess_emb(i1, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
             s2 = self.generate_sess_emb(i2, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
@@ -499,6 +546,10 @@ class MDHG(Module):
             s3_fuzzy = self.generate_sess_emb(i3_fuzzy, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
             s_comp = self.generate_sess_emb(i_comp, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
             s_sub = self.generate_sess_emb(i_sub, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
+            s_line_comp = self.generate_sess_emb(i_comp_pair, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
+            s_line_sub = self.generate_sess_emb(i_sub_pair, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
+            s_hyper_comp = self.generate_sess_emb(i_comp_hyper, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
+            s_hyper_sub = self.generate_sess_emb(i_sub_hyper, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
 
         s3 = hyperedge_act.unsqueeze(1) * s3_fuzzy + (1.0 - hyperedge_act.unsqueeze(1)) * s3_base
         # session-level uses per-session repeat ratio for personalized relation fusion
@@ -556,7 +607,10 @@ class MDHG(Module):
         loss_item = ce_loss + self.bpr_loss_weight * bpr_loss + self.intent_align_weight * intent_align_loss
         if train:
             loss_item = loss_item + self.comp_sub_decouple_weight * comp_sub_decouple_loss
-        con_loss = torch.tensor(0.0, device=scores_item.device)
+        line_view = 0.5 * (s_line_comp + s_line_sub)
+        hyper_view = 0.5 * (s_hyper_comp + s_hyper_sub)
+        self._debug_cross_view_features(line_view, hyper_view, epoch, train)
+        con_loss = self.cross_view_contrastive(line_view, hyper_view) if train else torch.tensor(0.0, device=scores_item.device)
 
         if train:
             fuzzy_raw = self.compute_fuzzy_losses(scores_item, tar, s1, s2, s3, sf, gate)
@@ -601,7 +655,7 @@ def train_test(model, train_data, test_data, epoch):
         model.zero_grad()
         with torch.cuda.amp.autocast(enabled=amp_enabled):
             tar, scores_item, con_loss, loss_item, fuzzy_loss = forward(model, i, train_data, epoch, train=True)
-            loss = loss_item + con_loss + fuzzy_loss
+            loss = loss_item + model.cl_weight * con_loss + fuzzy_loss
         scaler.scale(loss).backward()
         scaler.unscale_(model.optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
