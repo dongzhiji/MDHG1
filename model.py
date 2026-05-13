@@ -108,8 +108,9 @@ class CrossViewContrastiveLoss(Module):
         view_b = F.normalize(view_b, p=2, dim=1)
         batch_size = view_a.size(0)
         identity = torch.arange(batch_size, device=view_a.device)
-        shift = torch.randint(1, batch_size, (1,), device=view_a.device).item()
-        shuffle_idx = torch.roll(identity, shifts=shift)
+        shuffle_idx = torch.randperm(batch_size, device=view_a.device)
+        while torch.any(shuffle_idx == identity):
+            shuffle_idx = torch.randperm(batch_size, device=view_a.device)
         neg_view_b = view_b[shuffle_idx]
         pos_sim = torch.sum(view_a * view_b, dim=1, keepdim=True) / self.temperature
         neg_sim_full = torch.matmul(view_a, neg_view_b.t()) / self.temperature
@@ -240,9 +241,10 @@ class MDHG(Module):
         self.base_weight_max = 0.70
         self.comp_sub_pair_hyper_mix = comp_sub_pair_hyper_mix
         self.comp_sub_decouple_weight = comp_sub_decouple_weight
+        self.comp_sub_view_mix = 0.5
         self.cl_weight = cl_weight
         self.cross_view_contrastive = CrossViewContrastiveLoss()
-        self._debug_cross_view_printed_epoch = -1
+        self._last_debug_epoch = -1
         self._position_weight_cache = dict()
         self.init_parameters()
 
@@ -486,7 +488,7 @@ class MDHG(Module):
         return self.max_fuzzy_factor * factor
 
     def _debug_cross_view_features(self, line_view, hyper_view, epoch, train):
-        if not train or epoch == self._debug_cross_view_printed_epoch:
+        if not train or epoch == self._last_debug_epoch:
             return
         line_detach = line_view.detach()
         hyper_detach = hyper_view.detach()
@@ -502,7 +504,7 @@ class MDHG(Module):
                 hyper_detach.var(unbiased=False).item()
             )
         )
-        self._debug_cross_view_printed_epoch = epoch
+        self._last_debug_epoch = epoch
 
     def forward(self, session_item, session_len, reversed_sess_item, reversed_sess_event, mask, epoch, tar, train):
         repeat_ratio = self.calc_repeat_ratio_batch(session_item)
@@ -614,8 +616,8 @@ class MDHG(Module):
         loss_item = ce_loss + self.bpr_loss_weight * bpr_loss + self.intent_align_weight * intent_align_loss
         if train:
             loss_item = loss_item + self.comp_sub_decouple_weight * comp_sub_decouple_loss
-        line_view = 0.5 * (s_line_comp + s_line_sub)
-        hyper_view = 0.5 * (s_hyper_comp + s_hyper_sub)
+        line_view = self.comp_sub_view_mix * s_line_comp + (1.0 - self.comp_sub_view_mix) * s_line_sub
+        hyper_view = self.comp_sub_view_mix * s_hyper_comp + (1.0 - self.comp_sub_view_mix) * s_hyper_sub
         self._debug_cross_view_features(line_view, hyper_view, epoch, train)
         con_loss = self.cross_view_contrastive(line_view, hyper_view) if train else torch.tensor(0.0, device=scores_item.device)
 
