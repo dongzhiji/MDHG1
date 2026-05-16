@@ -14,6 +14,21 @@ def trans_to_cpu(variable):
     return variable.cpu() if torch.cuda.is_available() else variable
 
 
+def info_nce_loss(z_hyper, z_line, temperature=0.2):
+    """标准的 InfoNCE 对比损失"""
+    # L2 归一化
+    z_hyper = F.normalize(z_hyper, p=2, dim=1)
+    z_line = F.normalize(z_line, p=2, dim=1)
+
+    # 计算 Batch 内所有样本对的相似度矩阵，并除以温度参数 temperature
+    sim_matrix = torch.mm(z_hyper, z_line.t()) / temperature
+
+    # 对角线上的元素是正样本对
+    labels = torch.arange(z_hyper.size(0), device=z_hyper.device)
+    loss = F.cross_entropy(sim_matrix, labels)
+
+    return loss
+
 def safe_sparse_mm(adjacency, dense):
     """
     Sparse-dense matmul with stable dtype boundaries:
@@ -96,6 +111,32 @@ class HyperGraphConv(Module):
         return torch.sum(torch.stack(outs), 0) / len(outs)
 
 
+class CrossViewContrastiveLoss(Module):
+    def __init__(self, temperature=0.2):
+        super(CrossViewContrastiveLoss, self).__init__()
+        self.temperature = temperature
+
+    def forward(self, view_a, view_b):
+        """
+        极简稳定的 InfoNCE 损失。
+        保证梯度不会因为切片或 shuffle 而断裂。
+        """
+        if view_a.size(0) < 2:
+            return view_a.new_tensor(0.0)
+
+        # L2 归一化
+        view_a = F.normalize(view_a, p=2, dim=1)
+        view_b = F.normalize(view_b, p=2, dim=1)
+        # 计算所有的相似度得分 (BatchSize * BatchSize)
+        # 对角线上的元素即为正样本得分
+        logits = torch.matmul(view_a, view_b.t()) / self.temperature
+        # 标签：对角线索引，即 [0, 1, 2, ..., BatchSize-1]
+        labels = torch.arange(logits.size(0), device=logits.device)
+        # 直接使用 CrossEntropy，它本身就等价于 InfoNCE
+        # 即最大化对角线的相似度，最小化其他所有位置的相似度
+        loss = F.cross_entropy(logits, labels)
+        return loss
+
 class MDHG(Module):
     def __init__(self, R, adj1, adj2, adjacency, adjacency_T, adjacency1, adjacency_comp, adjacency_sub, hyper_comp, hyper_sub, R1, comp_deg, sub_deg,
                  adjacency_fuzzy, adjacency_T_fuzzy, adjacency1_fuzzy,
@@ -103,7 +144,8 @@ class MDHG(Module):
                  n_node, lr, layers, l2, beta, lam, eps, dataset,
                  K1, K2, K3, dropout, alpha, emb_size=100, batch_size=100,
                  intent_align_weight=0.03, short_intent_min=0.10, short_intent_max=0.45,
-                 short_len_factor_min=0.35, comp_sub_pair_hyper_mix=0.5, comp_sub_decouple_weight=0.02):
+                 short_len_factor_min=0.35, comp_sub_pair_hyper_mix=0.5, comp_sub_decouple_weight=0.02,
+                 cl_weight=0.01, comp_sub_view_mix=0.5):
         super(MDHG, self).__init__()
         self.emb_size = emb_size
         self.batch_size = batch_size
@@ -212,6 +254,10 @@ class MDHG(Module):
         self.base_weight_max = 0.70
         self.comp_sub_pair_hyper_mix = comp_sub_pair_hyper_mix
         self.comp_sub_decouple_weight = comp_sub_decouple_weight
+        self.comp_sub_view_mix = comp_sub_view_mix
+        self.cl_weight = cl_weight
+        self.cross_view_contrastive = CrossViewContrastiveLoss()
+        self._last_debug_epoch = -1
         self._position_weight_cache = dict()
         self.init_parameters()
 
@@ -454,6 +500,25 @@ class MDHG(Module):
         factor = min((epoch - self.warmup_epochs + 1) / span, 1.0)
         return self.max_fuzzy_factor * factor
 
+    def _debug_cross_view_features(self, line_view, hyper_view, epoch, train):
+        if not train or epoch == self._last_debug_epoch:
+            return
+        line_detach = line_view.detach()
+        hyper_detach = hyper_view.detach()
+        print(
+            '[CrossViewDebug] epoch={} line_view shape={} mean={:.6f} var={:.6f} | '
+            'hyper_view shape={} mean={:.6f} var={:.6f}'.format(
+                epoch,
+                tuple(line_detach.shape),
+                line_detach.mean().item(),
+                line_detach.var(unbiased=False).item(),
+                tuple(hyper_detach.shape),
+                hyper_detach.mean().item(),
+                hyper_detach.var(unbiased=False).item()
+            )
+        )
+        self._last_debug_epoch = epoch
+
     def forward(self, session_item, session_len, reversed_sess_item, reversed_sess_event, mask, epoch, tar, train):
         repeat_ratio = self.calc_repeat_ratio_batch(session_item)
         fuzzy_strength = (0.20 + 0.45 * torch.clamp(repeat_ratio / 0.3, max=1.0)).unsqueeze(1)
@@ -464,11 +529,38 @@ class MDHG(Module):
         i2, _ = self.ItemGraph(self.adj2_fuzzy, self.adjacency_T_fuzzy, self.embedding2.weight, 1)
         i3_base, _ = self.ItemGraph(self.R1, self.adjacency1, self.embedding3.weight, 2)
         i3_fuzzy, _ = self.ItemGraph(self.R1_fuzzy, self.adjacency1_fuzzy, self.embedding3.weight, 2)
-        i_comp_pair, _ = self.ItemGraph(self.comp_deg, self.adjacency_comp, self.embedding3.weight, 2)
+
+        # ======= 1. 在卷积前，给初始特征加上不同的随机噪声 (Feature Dropout) =======
+        if train:
+            emb_drop_line = F.dropout(self.embedding3.weight, p=0.1)
+            emb_drop_hyper = F.dropout(self.embedding3.weight, p=0.1)
+        else:
+            emb_drop_line = self.embedding3.weight
+            emb_drop_hyper = self.embedding3.weight
+
+        # 用带噪声的特征分别做图卷积
+        i_comp_pair, _ = self.ItemGraph(self.comp_deg, self.adjacency_comp, emb_drop_line, 2)
+        i_comp_hyper = self.CompHyperGraph(self.hyper_comp, emb_drop_hyper)
+        # ===========================================================================
+
         i_sub_pair, _ = self.ItemGraph(self.sub_deg, self.adjacency_sub, self.embedding3.weight, 2)
-        i_comp_hyper = self.CompHyperGraph(self.hyper_comp, self.embedding3.weight)
         i_sub_hyper = self.SubHyperGraph(self.hyper_sub, self.embedding3.weight)
+
         i_comp = (1.0 - self.comp_sub_pair_hyper_mix) * i_comp_pair + self.comp_sub_pair_hyper_mix * i_comp_hyper
+
+        # ======= 2. 节点级别的双视图对比学习 =======
+        if train:
+            num_nodes = i_comp_pair.size(0)
+            sample_size = min(1024, num_nodes)
+            sampled_idx = torch.randperm(num_nodes, device=i_comp_pair.device)[:sample_size]
+
+            node_line = i_comp_pair[sampled_idx]
+            node_hyper = i_comp_hyper[sampled_idx]
+
+            node_cl_loss = info_nce_loss(node_line, node_hyper, temperature=0.15)
+        else:
+            node_cl_loss = torch.tensor(0.0, device=i_comp_pair.device)
+        # ==========================================
         i_sub = (1.0 - self.comp_sub_pair_hyper_mix) * i_sub_pair + self.comp_sub_pair_hyper_mix * i_sub_hyper
         hyperedge_act = self.build_hyperedge_activation(session_item, reversed_sess_event)
         mean_hyperedge_activation = hyperedge_act.mean()
@@ -492,6 +584,10 @@ class MDHG(Module):
             s3_fuzzy = self.generate_sess_emb_npos(i3_fuzzy, event_weight, session_item, session_len,reversed_sess_item, reversed_sess_event, mask)
             s_comp = self.generate_sess_emb_npos(i_comp, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
             s_sub = self.generate_sess_emb_npos(i_sub, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
+            s_line_comp = self.generate_sess_emb_npos(i_comp_pair, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
+            s_line_sub = self.generate_sess_emb_npos(i_sub_pair, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
+            s_hyper_comp = self.generate_sess_emb_npos(i_comp_hyper, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
+            s_hyper_sub = self.generate_sess_emb_npos(i_sub_hyper, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
         else:
             s1 = self.generate_sess_emb(i1, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
             s2 = self.generate_sess_emb(i2, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
@@ -499,6 +595,10 @@ class MDHG(Module):
             s3_fuzzy = self.generate_sess_emb(i3_fuzzy, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
             s_comp = self.generate_sess_emb(i_comp, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
             s_sub = self.generate_sess_emb(i_sub, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
+            s_line_comp = self.generate_sess_emb(i_comp_pair, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
+            s_line_sub = self.generate_sess_emb(i_sub_pair, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
+            s_hyper_comp = self.generate_sess_emb(i_comp_hyper, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
+            s_hyper_sub = self.generate_sess_emb(i_sub_hyper, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
 
         s3 = hyperedge_act.unsqueeze(1) * s3_fuzzy + (1.0 - hyperedge_act.unsqueeze(1)) * s3_base
         # session-level uses per-session repeat ratio for personalized relation fusion
@@ -556,8 +656,20 @@ class MDHG(Module):
         loss_item = ce_loss + self.bpr_loss_weight * bpr_loss + self.intent_align_weight * intent_align_loss
         if train:
             loss_item = loss_item + self.comp_sub_decouple_weight * comp_sub_decouple_loss
-        con_loss = torch.tensor(0.0, device=scores_item.device)
+        line_view = self.comp_sub_view_mix * s_line_comp + (1.0 - self.comp_sub_view_mix) * s_line_sub
+        hyper_view = self.comp_sub_view_mix * s_hyper_comp + (1.0 - self.comp_sub_view_mix) * s_hyper_sub
+        self._debug_cross_view_features(line_view, hyper_view, epoch, train)
+        con_loss = self.cross_view_contrastive(line_view, hyper_view)
+        # ======= 3. 联合对比损失 =======
+        if train:
+            # 结合你最初的想法：会话级也来一次对比
+            session_cl_loss = info_nce_loss(s_comp, s1, temperature=0.15)
 
+            # 把 Node 级别和 Session 级别的对比损失加起来
+            con_loss = node_cl_loss + session_cl_loss
+        else:
+            con_loss = torch.tensor(0.0, device=scores_item.device)
+        # ===============================
         if train:
             fuzzy_raw = self.compute_fuzzy_losses(scores_item, tar, s1, s2, s3, sf, gate)
             fuzzy_loss = self.fuzzy_schedule(epoch) * fuzzy_raw
@@ -601,7 +713,7 @@ def train_test(model, train_data, test_data, epoch):
         model.zero_grad()
         with torch.cuda.amp.autocast(enabled=amp_enabled):
             tar, scores_item, con_loss, loss_item, fuzzy_loss = forward(model, i, train_data, epoch, train=True)
-            loss = loss_item + con_loss + fuzzy_loss
+            loss = loss_item + model.cl_weight * con_loss + fuzzy_loss
         scaler.scale(loss).backward()
         scaler.unscale_(model.optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
