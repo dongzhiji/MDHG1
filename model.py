@@ -677,7 +677,7 @@ class MDHG(Module):
         sf = self.fuse_session_views(s1, s2, s3, gate)
         sf_base = sf
         capsule_views = torch.stack([s1, s2, s3], dim=1)
-        capsule_caps, capsule_weights, capsule_session, capsule_div_loss = self.interest_capsule(capsule_views, sf_base)
+        _, _, capsule_session, capsule_div_loss = self.interest_capsule(capsule_views, sf_base)
         sf_base = (1.0 - self.capsule_fuse_weight) * sf_base + self.capsule_fuse_weight * capsule_session
 
         last_item_ids = reversed_sess_item[:, 0]
