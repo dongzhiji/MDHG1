@@ -286,6 +286,9 @@ class MDHG(Module):
         self.soft_label_smooth_max = 0.06
         self.label_smoothing = 0.06
         self.bpr_loss_weight = 0.18
+        self.mrr_loss_weight = 0.10
+        self.mrr_loss_topk = 20
+        self.mrr_loss_temperature = 0.75
         self.intent_align_weight = intent_align_weight
         self.short_intent_min = short_intent_min
         self.short_intent_max = short_intent_max
@@ -452,6 +455,26 @@ class MDHG(Module):
         rand_col = torch.randint(0, k, (B,), device=logits.device)
         sampled_neg = hard_vals[torch.arange(B, device=logits.device), rand_col]
         return -torch.log(torch.sigmoid(pos - sampled_neg) + 1e-8).mean()
+
+    def mrr_rank_loss(self, logits, target, topk=20, temperature=0.75):
+        """Listwise surrogate that emphasizes reciprocal-rank improvement on the top negatives."""
+        B, N = logits.size()
+        pos = logits.gather(1, target.view(-1, 1)).squeeze(1)  # [B]
+
+        neg_logits = logits.clone()
+        neg_logits.scatter_(1, target.view(-1, 1), -1e9)
+        k = min(topk, N - 1)
+        if k <= 0:
+            return logits.new_tensor(0.0)
+
+        hard_vals, _ = torch.topk(neg_logits, k=k, dim=1)
+        ranks = torch.arange(k, device=logits.device, dtype=logits.dtype)
+        reciprocal_weights = 1.0 / torch.log2(ranks + 2.0)
+        reciprocal_weights = reciprocal_weights / reciprocal_weights.sum().clamp(min=1e-8)
+
+        pairwise_gap = (hard_vals - pos.unsqueeze(1)) / max(temperature, 1e-8)
+        topk_loss = F.softplus(pairwise_gap) * reciprocal_weights.unsqueeze(0)
+        return topk_loss.sum(dim=1).mean()
 
     def generate_sess_emb(self, item_embedding, event_embedding, session_item, session_len, reversed_sess_item,
                           reversed_sess_event, mask):
@@ -709,13 +732,21 @@ class MDHG(Module):
         tar_safe = torch.clamp(tar, min=0, max=item_mix.size(0) - 1)
         ce_loss = self.ce_with_label_smoothing(scores_item, tar_safe, smooth=self.label_smoothing)
         bpr_loss = self.bpr_hard_negative_loss(scores_item, tar_safe, topk=self.topk_hardneg)
+        mrr_loss = self.mrr_rank_loss(
+            scores_item, tar_safe, topk=self.mrr_loss_topk, temperature=self.mrr_loss_temperature
+        )
         if train:
             sf_base_norm = F.normalize(sf_base, dim=-1)
             target_item_emb = item_mix[tar_safe]
             intent_align_loss = (1.0 - F.cosine_similarity(sf_base_norm, target_item_emb, dim=-1)).mean()
         else:
             intent_align_loss = torch.tensor(0.0, device=scores_item.device)
-        loss_item = ce_loss + self.bpr_loss_weight * bpr_loss + self.intent_align_weight * intent_align_loss
+        loss_item = (
+            ce_loss +
+            self.bpr_loss_weight * bpr_loss +
+            self.mrr_loss_weight * mrr_loss +
+            self.intent_align_weight * intent_align_loss
+        )
         if train:
             loss_item = loss_item + self.comp_sub_decouple_weight * comp_sub_decouple_loss
             loss_item = loss_item + 0.01 * capsule_div_loss
