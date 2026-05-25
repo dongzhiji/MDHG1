@@ -269,10 +269,9 @@ class MDHG(Module):
         self.optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         # ---- 稳定版损失配置（先保主任务）----
         self.fuzzy_prior_strength = 0.35
-        self.rank_margin = 0.30
         self.rel_loss_weight = 0.05
         self.sess_loss_weight = 0.01
-        self.rank_loss_weight = 0.18
+        self.rank_loss_weight = 0.24
         self.hyper_loss_weight = 0.01
         self.soft_loss_weight = 0.02
         self.warmup_epochs = 0
@@ -283,18 +282,18 @@ class MDHG(Module):
         self.item_prior_mix = 0.10
         self.soft_label_smooth_min = 0.02
         self.soft_label_smooth_gain = 0.08
-        self.soft_label_smooth_max = 0.06
-        self.label_smoothing = 0.06
-        self.bpr_loss_weight = 0.18
-        self.mrr_loss_weight = 0.10
+        self.soft_label_smooth_max = 0.04
+        self.label_smoothing = 0.03
+        self.bpr_loss_weight = 0.12
+        self.mrr_loss_weight = 0.20
         self.mrr_loss_topk = 20
-        self.mrr_loss_temperature = 0.75
+        self.mrr_loss_temperature = 0.60
         self.intent_align_weight = intent_align_weight
         self.short_intent_min = short_intent_min
         self.short_intent_max = short_intent_max
         self.short_len_factor_min = short_len_factor_min
         self.topk_hardneg = 100
-        self.score_temperature = 0.85
+        self.score_temperature = 0.75
 
         # item-view complementary/substitute fusion weights
         self.comp_weight_base = 0.60
@@ -468,13 +467,16 @@ class MDHG(Module):
             return logits.new_tensor(0.0)
 
         hard_vals, _ = torch.topk(neg_logits, k=k, dim=1)
+        pairwise_gap = (hard_vals - pos.unsqueeze(1)) / max(temperature, 1e-8)
+
         ranks = torch.arange(k, device=logits.device, dtype=logits.dtype)
         reciprocal_weights = 1.0 / torch.log2(ranks + 2.0)
         reciprocal_weights = reciprocal_weights / reciprocal_weights.sum().clamp(min=1e-8)
 
-        pairwise_gap = (hard_vals - pos.unsqueeze(1)) / max(temperature, 1e-8)
-        topk_loss = F.softplus(pairwise_gap) * reciprocal_weights.unsqueeze(0)
-        return topk_loss.sum(dim=1).mean()
+        soft_rank = 1.0 + torch.sum(torch.sigmoid(pairwise_gap) * reciprocal_weights.unsqueeze(0), dim=1)
+        reciprocal_rank_loss = 1.0 - (1.0 / soft_rank)
+        top1_loss = F.softplus(pairwise_gap[:, 0])
+        return (reciprocal_rank_loss + 0.35 * top1_loss).mean()
 
     def generate_sess_emb(self, item_embedding, event_embedding, session_item, session_len, reversed_sess_item,
                           reversed_sess_event, mask):
@@ -547,11 +549,10 @@ class MDHG(Module):
         ce_each = F.cross_entropy(scores_item, tar, reduction='none')
         sess_loss = torch.mean((1.0 + 0.15 * entropy) * ce_each)
 
-        pos = scores_item.gather(1, tar.view(-1, 1)).squeeze(1)
-        neg = scores_item.clone()
-        neg.scatter_(1, tar.view(-1, 1), -1e9)
-        hard_neg, _ = torch.max(neg, dim=1)
-        rank_loss = torch.mean(F.relu(self.rank_margin - pos + hard_neg))
+        rank_loss = self.mrr_rank_loss(
+            scores_item, tar, topk=min(self.mrr_loss_topk, scores_item.size(1) - 1),
+            temperature=self.mrr_loss_temperature
+        )
 
         n_items = scores_item.size(1)
         smooth = torch.clamp(
