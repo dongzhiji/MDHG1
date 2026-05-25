@@ -65,7 +65,11 @@ parser.add_argument('--sub_tail_scale', type=float, default=0.85, help='threshol
 parser.add_argument('--comp_sub_decouple_weight', type=float, default=0.02, help='regularization weight for comp/sub embedding decorrelation')
 parser.add_argument('--cl_weight', type=float, default=0.1, help='weight for cross-view contrastive loss')
 parser.add_argument('--comp_sub_view_mix', type=float, default=0.5, help='mix ratio of complementary vs substitute session views for contrastive alignment')
+parser.add_argument('--num_interest_capsules', type=int, default=4, help='number of interest capsules')
+parser.add_argument('--capsule_routing_iters', type=int, default=3, help='routing iterations in interest capsule layer')
+parser.add_argument('--capsule_fuse_weight', type=float, default=0.35, help='fusion weight for capsule-enhanced session representation')
 opt = parser.parse_args()
+dataset_key = opt.dataset.lower()
 # 设置日志文件
 log_file = setup_logging()
 logging.info(f"日志文件: {log_file}")
@@ -103,28 +107,31 @@ def main():
     logging.info("=" * 60)
     logging.info("开始加载数据...")
 
-    train_data = pickle.load(open('datasets/' + opt.dataset + '/train.txt', 'rb'))
-    test_data = pickle.load(open('datasets/' + opt.dataset + '/test.txt', 'rb'))
-    all_train = pickle.load(open('datasets/' + opt.dataset + '/all_train_seq.txt', 'rb'))
+    train_path = os.path.join('datasets', dataset_key, 'train.txt')
+    test_path = os.path.join('datasets', dataset_key, 'test.txt')
+    all_train_path = os.path.join('datasets', dataset_key, 'all_train_seq.txt')
+    train_data = pickle.load(open(train_path, 'rb'))
+    test_data = pickle.load(open(test_path, 'rb'))
+    all_train = pickle.load(open(all_train_path, 'rb'))
 
-    if opt.dataset == 'Tmall':
+    if dataset_key == 'tmall':
         n_node = 40727
-    elif opt.dataset == 'retailrocket':#最大的 item ID = 36968
+    elif dataset_key == 'retailrocket':#最大的 item ID = 36968
         n_node = 36968
-    elif opt.dataset == 'amazon':
+    elif dataset_key == 'amazon':
         n_node = 18888
-    elif opt.dataset == 'lastfm':#最大的 item ID = 38997
+    elif dataset_key == 'lastfm':#最大的 item ID = 38997
         n_node = 38997
-    elif opt.dataset == 'diginetica':#最大的 item ID = 43097
+    elif dataset_key == 'diginetica':#最大的 item ID = 43097
         n_node =43097
-    elif opt.dataset == 'Nowplaying':
+    elif dataset_key == 'nowplaying':
         n_node = 60416
-    elif opt.dataset == 'reddit':
+    elif dataset_key == 'reddit':
         n_node = 27453
     else:
         n_node = 309
-    logging.info(f"数据集: {opt.dataset}, 节点数: {n_node}")
-    comp_sub_cache_dir = opt.comp_sub_cache_dir if opt.comp_sub_cache_dir else os.path.join('datasets', opt.dataset, 'graph_cache')
+    logging.info(f"数据集: {dataset_key}, 节点数: {n_node}")
+    comp_sub_cache_dir = opt.comp_sub_cache_dir if opt.comp_sub_cache_dir else os.path.join('datasets', dataset_key, 'graph_cache')
 
     train_data = Data(
         train_data, all_train, shuffle=False, n_node=n_node, comp_max_gap=opt.comp_max_gap,
@@ -137,7 +144,7 @@ def main():
         sub_head_quantile=opt.sub_head_quantile, sub_head_scale=opt.sub_head_scale, sub_tail_scale=opt.sub_tail_scale,
         comp_sub_cache=bool(opt.comp_sub_cache),
         comp_sub_cache_dir=comp_sub_cache_dir,
-        cache_prefix=f"{opt.dataset}_train"
+        cache_prefix=f"{dataset_key}_train"
     )
     test_data = Data(
         test_data, all_train, shuffle=False, n_node=n_node, comp_max_gap=opt.comp_max_gap,
@@ -150,7 +157,7 @@ def main():
         sub_head_quantile=opt.sub_head_quantile, sub_head_scale=opt.sub_head_scale, sub_tail_scale=opt.sub_tail_scale,
         comp_sub_cache=bool(opt.comp_sub_cache),
         comp_sub_cache_dir=comp_sub_cache_dir,
-        cache_prefix=f"{opt.dataset}_train"
+        cache_prefix=f"{dataset_key}_train"
     )
 
     logging.info("创建模型...")
@@ -184,7 +191,7 @@ def main():
         layers=opt.layer,
         emb_size=opt.embSize,
         batch_size=opt.batchSize,
-        dataset=opt.dataset,
+        dataset=dataset_key,
         K1=opt.K1,
         K2=opt.K2,
         K3=opt.K3,
@@ -197,7 +204,10 @@ def main():
         comp_sub_pair_hyper_mix=opt.comp_sub_pair_hyper_mix,
         comp_sub_decouple_weight=opt.comp_sub_decouple_weight,
         cl_weight=opt.cl_weight,
-        comp_sub_view_mix=opt.comp_sub_view_mix
+        comp_sub_view_mix=opt.comp_sub_view_mix,
+        num_interest_capsules=opt.num_interest_capsules,
+        capsule_routing_iters=opt.capsule_routing_iters,
+        capsule_fuse_weight=opt.capsule_fuse_weight
     ))
 
     #reset_parameters(model)
@@ -258,7 +268,7 @@ def main():
     result_file = log_file.replace('.log', '_results.txt')
     with open(result_file, 'w') as f:
         f.write("=" * 60 + "\n")
-        f.write(f"数据集: {opt.dataset}\n")
+        f.write(f"数据集: {dataset_key}\n")
         f.write(f"参数: {opt}\n")
         f.write("=" * 60 + "\n")
         f.write("最终最佳结果:\n")

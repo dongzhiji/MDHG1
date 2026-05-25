@@ -111,6 +111,57 @@ class HyperGraphConv(Module):
         return torch.sum(torch.stack(outs), 0) / len(outs)
 
 
+class InterestCapsuleRouter(Module):
+    def __init__(self, emb_size, num_capsules=4, routing_iters=3, dropout=0.1):
+        super(InterestCapsuleRouter, self).__init__()
+        self.emb_size = emb_size
+        self.num_capsules = max(2, int(num_capsules))
+        self.routing_iters = max(1, int(routing_iters))
+        self.vote_proj = nn.Linear(self.emb_size, self.num_capsules * self.emb_size, bias=False)
+        self.mix_gate = nn.Sequential(
+            nn.Linear(2 * self.emb_size, self.emb_size),
+            nn.ReLU(),
+            nn.Linear(self.emb_size, self.emb_size)
+        )
+        self.dropout = nn.Dropout(dropout)
+
+    def squash(self, tensor):
+        norm_sq = torch.sum(tensor * tensor, dim=-1, keepdim=True)
+        scale = norm_sq / (1.0 + norm_sq)
+        return scale * tensor / torch.sqrt(norm_sq + 1e-8)
+
+    def diversity_loss(self, capsules):
+        if capsules.size(1) < 2:
+            return capsules.new_tensor(0.0)
+        caps = F.normalize(capsules, dim=-1)
+        sim = torch.matmul(caps, caps.transpose(1, 2))
+        eye = torch.eye(sim.size(1), device=sim.device, dtype=sim.dtype).unsqueeze(0)
+        off_diag = (sim - eye).pow(2)
+        denom = max(sim.size(1) * max(sim.size(1) - 1, 1), 1)
+        return off_diag.sum(dim=(1, 2)).mean() / denom
+
+    def forward(self, view_states, session_state):
+        batch_size, num_views, _ = view_states.size()
+        votes = self.vote_proj(view_states).view(batch_size, num_views, self.num_capsules, self.emb_size)
+        votes = self.dropout(votes)
+        if session_state is None:
+            session_state = view_states.mean(dim=1)
+        session_query = session_state.unsqueeze(1).unsqueeze(2)
+        logits = torch.sum(votes * session_query, dim=-1)
+        for routing_idx in range(self.routing_iters):
+            coeff = torch.softmax(logits, dim=2)
+            capsule_inputs = torch.sum(coeff.unsqueeze(-1) * votes, dim=1)
+            capsules = self.squash(capsule_inputs)
+            if routing_idx + 1 < self.routing_iters:
+                logits = logits + torch.sum(votes * capsules.unsqueeze(1), dim=-1)
+        capsule_scores = torch.sum(capsules * session_state.unsqueeze(1), dim=-1)
+        capsule_weights = torch.softmax(capsule_scores, dim=1)
+        capsule_summary = torch.sum(capsule_weights.unsqueeze(-1) * capsules, dim=1)
+        fusion_gate = torch.sigmoid(self.mix_gate(torch.cat([session_state, capsule_summary], dim=-1)))
+        fused_session = fusion_gate * capsule_summary + (1.0 - fusion_gate) * session_state
+        return capsules, capsule_weights, fused_session, self.diversity_loss(capsules)
+
+
 class CrossViewContrastiveLoss(Module):
     def __init__(self, temperature=0.2):
         super(CrossViewContrastiveLoss, self).__init__()
@@ -145,12 +196,13 @@ class MDHG(Module):
                  K1, K2, K3, dropout, alpha, emb_size=100, batch_size=100,
                  intent_align_weight=0.03, short_intent_min=0.10, short_intent_max=0.45,
                  short_len_factor_min=0.35, comp_sub_pair_hyper_mix=0.5, comp_sub_decouple_weight=0.02,
-                 cl_weight=0.01, comp_sub_view_mix=0.5):
+                 cl_weight=0.01, comp_sub_view_mix=0.5, num_interest_capsules=4,
+                 capsule_routing_iters=3, capsule_fuse_weight=0.35):
         super(MDHG, self).__init__()
         self.emb_size = emb_size
         self.batch_size = batch_size
         self.n_node = n_node
-        self.dataset = dataset
+        self.dataset = dataset.lower()
         self.lr = lr
         self.layers = layers
         self.use_amp = False
@@ -257,6 +309,13 @@ class MDHG(Module):
         self.comp_sub_view_mix = comp_sub_view_mix
         self.cl_weight = cl_weight
         self.cross_view_contrastive = CrossViewContrastiveLoss()
+        self.num_interest_capsules = num_interest_capsules
+        self.capsule_routing_iters = capsule_routing_iters
+        self.capsule_fuse_weight = float(np.clip(capsule_fuse_weight, 0.0, 1.0))
+        self.interest_capsule = InterestCapsuleRouter(
+            self.emb_size, num_capsules=self.num_interest_capsules,
+            routing_iters=self.capsule_routing_iters, dropout=dropout
+        )
         self._last_debug_epoch = -1
         self._position_weight_cache = dict()
         self.init_parameters()
@@ -291,7 +350,7 @@ class MDHG(Module):
     def build_fuzzy_relation_prior(self, session_item, reversed_sess_event):
         repeat_ratio = self.calc_repeat_ratio_batch(session_item)
         evt_strength = self.event_scale(reversed_sess_event).squeeze(-1).mean(dim=1)
-        if self.dataset == 'Tmall':
+        if self.dataset == 'tmall':
             c1 = torch.clamp(0.70 + 0.20 * evt_strength - 0.15 * repeat_ratio, min=0.10)  # 顺序
             c2 = torch.clamp(0.60 + 0.15 * (1.0 - repeat_ratio), min=0.10)  # 转移
             c3 = torch.clamp(0.30 + 0.35 * repeat_ratio + 0.10 * evt_strength, min=0.10)  # 共现
@@ -577,7 +636,7 @@ class MDHG(Module):
         # Penalize comp/sub channel correlation so complementary and substitute semantics remain disentangled.
         comp_sub_decouple_loss = (F.normalize(i_comp, dim=-1) * F.normalize(i_sub, dim=-1)).sum(dim=1).pow(2).mean()
 
-        if self.dataset == 'Tmall':
+        if self.dataset == 'tmall':
             s1 = self.generate_sess_emb_npos(i1, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
             s2 = self.generate_sess_emb_npos(i2, event_weight, session_item, session_len, reversed_sess_item, reversed_sess_event, mask)
             s3_base = self.generate_sess_emb_npos(i3_base, event_weight, session_item, session_len, reversed_sess_item,reversed_sess_event, mask)
@@ -617,6 +676,9 @@ class MDHG(Module):
 
         sf = self.fuse_session_views(s1, s2, s3, gate)
         sf_base = sf
+        capsule_views = torch.stack([s1, s2, s3], dim=1)
+        capsule_caps, capsule_weights, capsule_session, capsule_div_loss = self.interest_capsule(capsule_views, sf_base)
+        sf_base = (1.0 - self.capsule_fuse_weight) * sf_base + self.capsule_fuse_weight * capsule_session
 
         last_item_ids = reversed_sess_item[:, 0]
         valid_last = (last_item_ids > 0)
@@ -656,6 +718,7 @@ class MDHG(Module):
         loss_item = ce_loss + self.bpr_loss_weight * bpr_loss + self.intent_align_weight * intent_align_loss
         if train:
             loss_item = loss_item + self.comp_sub_decouple_weight * comp_sub_decouple_loss
+            loss_item = loss_item + 0.01 * capsule_div_loss
         line_view = self.comp_sub_view_mix * s_line_comp + (1.0 - self.comp_sub_view_mix) * s_line_sub
         hyper_view = self.comp_sub_view_mix * s_hyper_comp + (1.0 - self.comp_sub_view_mix) * s_hyper_sub
         self._debug_cross_view_features(line_view, hyper_view, epoch, train)
